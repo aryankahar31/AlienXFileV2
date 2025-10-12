@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AlienX Download</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=SF+Pro+Display:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --accent-color: #A7C7E7;
+            --accent-glow: rgba(167, 199, 231, 0.3);
+            --bg-start: #F5F7FA;
+            --bg-end: #C3CFE2;
+            --card-bg: rgba(255, 255, 255, 0.25);
+            --card-border: rgba(255, 255, 255, 0.4);
+            --shadow-soft: rgba(0, 0, 0, 0.05);
+            --shadow-deep: rgba(0, 0, 0, 0.1);
+            --text-color: #1D1D1F;
+            --text-muted: #6E6E73;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'SF Pro Display', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: linear-gradient(135deg, var(--bg-start), var(--bg-end));
+            color: var(--text-color);
+            display: grid;
+            place-items: center;
+            min-height: 100vh;
+            padding: 20px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: radial-gradient(circle at 20% 80%, rgba(167, 199, 231, 0.1) 0%, transparent 50%),
+                        radial-gradient(circle at 80% 20%, rgba(255, 255, 255, 0.1) 0%, transparent 50%);
+            pointer-events: none;
+            z-index: -1;
+        }
+
+        .box {
+            background: var(--card-bg);
+            backdrop-filter: blur(40px);
+            -webkit-backdrop-filter: blur(40px);
+            border: 1px solid var(--card-border);
+            border-radius: 24px;
+            width: 100%;
+            max-width: 400px;
+            padding: 40px;
+            text-align: center;
+            box-shadow: 
+                0 8px 32px var(--shadow-soft),
+                0 2px 16px var(--shadow-deep),
+                inset 0 1px 0 rgba(255, 255, 255, 0.2);
+            animation: floatIn 0.8s ease-out;
+            position: relative;
+        }
+
+        .box::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 1px;
+            background: linear-gradient(to right, transparent, rgba(255, 255, 255, 0.4), transparent);
+            pointer-events: none;
+        }
+
+        @keyframes floatIn {
+            from { 
+                opacity: 0; 
+                transform: translateY(30px) scale(0.95); 
+            }
+            to { 
+                opacity: 1; 
+                transform: translateY(0) scale(1); 
+            }
+        }
+
+        .box h2 {
+            background: linear-gradient(135deg, var(--text-color), var(--accent-color));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin: 0 0 32px;
+            font-size: 24px;
+            font-weight: 600;
+            letter-spacing: -0.5px;
+        }
+
+        input[type="text"] {
+            width: 100%;
+            padding: 16px;
+            font-size: 16px;
+            border-radius: 16px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            box-sizing: border-box;
+            transition: all 0.3s ease;
+            color: var(--text-color);
+            margin-bottom: 16px;
+        }
+        input[type="text"]:focus {
+            outline: none;
+            border-color: var(--accent-color);
+            box-shadow: 
+                0 0 0 3px var(--accent-glow),
+                0 4px 16px var(--shadow-deep);
+        }
+        input[type="text"]::placeholder {
+            color: var(--text-muted);
+        }
+
+        button[type="submit"] {
+            width: 100%;
+            padding: 16px;
+            font-size: 16px;
+            font-weight: 600;
+            border-radius: 16px;
+            border: none;
+            cursor: pointer;
+            background: linear-gradient(135deg, var(--accent-color), #8AB4F8);
+            color: var(--text-color);
+            transition: all 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+            box-shadow: 
+                0 4px 16px var(--shadow-soft),
+                inset 0 1px 0 rgba(255, 255, 255, 0.2);
+        }
+        button[type="submit"]:hover {
+            transform: translateY(-3px) scale(1.02);
+            box-shadow: 
+                0 8px 24px var(--accent-glow),
+                inset 0 1px 0 rgba(255, 255, 255, 0.3);
+        }
+        button[type="submit"]:active {
+            transform: translateY(-1px) scale(1);
+        }
+
+        .msg {
+            margin-top: 24px;
+            font-size: 15px;
+        }
+        .msg a {
+            color: var(--text-muted);
+            text-decoration: none;
+            transition: all 0.3s ease;
+            font-weight: 500;
+            padding: 8px 0;
+            display: block;
+            border-radius: 8px;
+        }
+        .msg a:hover {
+            color: var(--text-color);
+            background: rgba(255, 255, 255, 0.1);
+            transform: translateY(-1px);
+        }
+
+        @media (max-width: 480px) {
+            .box { padding: 32px 24px; }
+            h2 { font-size: 20px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="box">
+        <h2>Download by Key</h2>
+        <form method="POST">
+            <input type="text" name="key" placeholder="Enter 4-digit key" required />
+            <button type="submit">Download</button>
+        </form>
+        <div class="msg">
+            <a href="/">Back to Share</a>
+        </div>
+    </div>
+</body>
+</html>

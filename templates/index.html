@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AlienX Instant Share</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=SF+Pro+Display:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --accent-color: #A7C7E7; /* Soft pastel blue for neutrality */
+            --accent-glow: rgba(167, 199, 231, 0.3);
+            --bg-start: #F5F7FA;
+            --bg-end: #C3CFE2;
+            --card-bg: rgba(255, 255, 255, 0.25);
+            --card-border: rgba(255, 255, 255, 0.4);
+            --shadow-soft: rgba(0, 0, 0, 0.05);
+            --shadow-deep: rgba(0, 0, 0, 0.1);
+            --text-color: #1D1D1F;
+            --text-muted: #6E6E73;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'SF Pro Display', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: linear-gradient(135deg, var(--bg-start), var(--bg-end));
+            color: var(--text-color);
+            display: grid;
+            place-items: center;
+            min-height: 100vh;
+            padding: 20px;
+            overflow-x: hidden;
+            position: relative;
+        }
+
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: radial-gradient(circle at 20% 80%, rgba(167, 199, 231, 0.1) 0%, transparent 50%),
+                        radial-gradient(circle at 80% 20%, rgba(255, 255, 255, 0.1) 0%, transparent 50%);
+            pointer-events: none;
+            z-index: -1;
+        }
+
+        .card {
+            background: var(--card-bg);
+            backdrop-filter: blur(40px);
+            -webkit-backdrop-filter: blur(40px);
+            border: 1px solid var(--card-border);
+            border-radius: 24px;
+            width: 100%;
+            max-width: 500px;
+            padding: 40px;
+            box-shadow: 
+                0 8px 32px var(--shadow-soft),
+                0 2px 16px var(--shadow-deep),
+                inset 0 1px 0 rgba(255, 255, 255, 0.2);
+            animation: floatIn 0.8s ease-out;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .card::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 1px;
+            background: linear-gradient(to right, transparent, rgba(255, 255, 255, 0.4), transparent);
+            pointer-events: none;
+        }
+
+        @keyframes floatIn {
+            from { 
+                opacity: 0; 
+                transform: translateY(30px) scale(0.95); 
+            }
+            to { 
+                opacity: 1; 
+                transform: translateY(0) scale(1); 
+            }
+        }
+
+        .card h2 {
+            text-align: center;
+            font-weight: 600;
+            margin-bottom: 32px;
+            font-size: 28px;
+            letter-spacing: -0.5px;
+            background: linear-gradient(135deg, var(--text-color), var(--accent-color));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        /* Segmented Control for Mode Switch */
+        .mode-switch {
+            display: flex;
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border-radius: 12px;
+            padding: 4px;
+            margin-bottom: 24px;
+            box-shadow: 0 2px 8px var(--shadow-soft);
+            overflow: hidden;
+        }
+        .mode-switch input[type="radio"] {
+            display: none;
+        }
+        .mode-switch label {
+            flex: 1;
+            text-align: center;
+            padding: 12px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: all 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+            color: var(--text-muted);
+            position: relative;
+        }
+        .mode-switch input[type="radio"]:checked + label {
+            background: rgba(255, 255, 255, 0.8);
+            color: var(--text-color);
+            font-weight: 600;
+            box-shadow: 
+                inset 0 -2px 0 rgba(0, 0, 0, 0.05),
+                0 2px 8px var(--shadow-soft);
+            transform: translateY(-1px);
+        }
+
+        /* Inputs */
+        #fileInputContainer, #textInput {
+            display: none; /* JS will handle this */
+            width: 100%;
+            margin-bottom: 24px;
+        }
+
+        #fileInputLabel {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 2px dashed rgba(255, 255, 255, 0.2);
+            border-radius: 16px;
+            padding: 40px 20px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 4px 16px var(--shadow-soft);
+        }
+        #fileInputLabel:hover {
+            background: rgba(255, 255, 255, 0.1);
+            border-color: var(--accent-color);
+            transform: translateY(-2px);
+            box-shadow: 0 8px 24px var(--shadow-deep);
+        }
+        #fileInputLabel span {
+            font-weight: 500;
+            color: var(--text-color);
+            margin-bottom: 8px;
+        }
+        #fileInputLabel small {
+            color: var(--text-muted);
+        }
+
+        #fileInput {
+            display: none;
+        }
+
+        #textInput {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            color: var(--text-color);
+            border-radius: 16px;
+            padding: 16px;
+            font-size: 16px;
+            min-height: 160px;
+            resize: vertical;
+            width: 100%;
+            transition: all 0.3s ease;
+            box-shadow: 0 2px 8px var(--shadow-soft);
+        }
+        #textInput:focus {
+            outline: none;
+            border-color: var(--accent-color);
+            box-shadow: 
+                0 0 0 3px var(--accent-glow),
+                0 4px 16px var(--shadow-deep);
+        }
+        #textInput::placeholder {
+            color: var(--text-muted);
+        }
+
+        /* Submit Button */
+        button[type="submit"] {
+            width: 100%;
+            padding: 16px;
+            font-size: 16px;
+            font-weight: 600;
+            border-radius: 16px;
+            border: none;
+            cursor: pointer;
+            background: linear-gradient(135deg, var(--accent-color), #8AB4F8);
+            color: var(--text-color);
+            transition: all 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+            box-shadow: 
+                0 4px 16px var(--shadow-soft),
+                inset 0 1px 0 rgba(255, 255, 255, 0.2);
+            position: relative;
+            overflow: hidden;
+        }
+        button[type="submit"]::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
+            transition: left 0.5s;
+        }
+        button[type="submit"]:hover::before {
+            left: 100%;
+        }
+        button[type="submit"]:hover {
+            transform: translateY(-3px) scale(1.02);
+            box-shadow: 
+                0 8px 24px var(--accent-glow),
+                inset 0 1px 0 rgba(255, 255, 255, 0.3);
+        }
+        button[type="submit"]:active {
+            transform: translateY(-1px) scale(1);
+        }
+
+        /* Result Area */
+        #result {
+            margin-top: 32px;
+            background: rgba(255, 255, 255, 0.15);
+            backdrop-filter: blur(30px);
+            -webkit-backdrop-filter: blur(30px);
+            padding: 20px;
+            border-radius: 16px;
+            font-size: 15px;
+            min-height: 60px;
+            transition: all 0.4s ease;
+            box-shadow: 0 4px 16px var(--shadow-soft);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .upload-item {
+            margin-bottom: 16px;
+            padding: 20px;
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border-radius: 12px;
+            border-left: 4px solid var(--accent-color);
+            box-shadow: 0 2px 8px var(--shadow-soft);
+            transition: all 0.3s ease;
+            animation: slideUp 0.4s ease-out;
+        }
+        .upload-item:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px var(--shadow-deep);
+        }
+        .upload-item:last-child {
+            margin-bottom: 0;
+        }
+        .upload-item b {
+            display: block;
+            margin-bottom: 12px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            font-weight: 600;
+        }
+        .upload-item .key-line {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 12px;
+            font-size: 14px;
+        }
+        .key-line .copy-btn {
+            background: rgba(255, 255, 255, 0.2);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            color: var(--text-color);
+            padding: 6px 12px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 500;
+            transition: all 0.2s ease;
+        }
+        .key-line .copy-btn:hover {
+            background: rgba(255, 255, 255, 0.3);
+            transform: scale(1.05);
+        }
+        .upload-item a {
+            color: var(--accent-color);
+            text-decoration: none;
+            font-weight: 500;
+            transition: all 0.2s ease;
+            margin-right: 12px;
+        }
+        .upload-item a:hover {
+            color: var(--text-color);
+            text-shadow: 0 1px 2px var(--shadow-soft);
+        }
+
+        hr {
+            border: 0;
+            height: 1px;
+            background: linear-gradient(to right, transparent, rgba(255, 255, 255, 0.2), transparent);
+            margin: 32px 0;
+        }
+
+        .download-link {
+            text-align: center;
+            display: block;
+            color: var(--text-muted);
+            text-decoration: none;
+            transition: all 0.3s ease;
+            font-weight: 500;
+            padding: 8px 0;
+            border-radius: 8px;
+        }
+        .download-link:hover {
+            color: var(--text-color);
+            background: rgba(255, 255, 255, 0.1);
+            transform: translateY(-1px);
+        }
+
+        @keyframes slideUp {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* Mobile Responsiveness */
+        @media (max-width: 480px) {
+            .card { padding: 32px 24px; }
+            .mode-switch { flex-direction: column; }
+            h2 { font-size: 24px; }
+        }
+    </style>
+</head>
+<body>
+    
+    <div class="card">
+        <h2>AlienX Instant Share</h2>
+        <form id="uploadForm" enctype="multipart/form-data">
+            
+            <div class="mode-switch">
+                <input type="radio" id="modeFile" name="mode" value="file" checked>
+                <label for="modeFile">File Upload</label>
+                
+                <input type="radio" id="modeText" name="mode" value="text">
+                <label for="modeText">Text Share</label>
+            </div>
+
+            <div id="fileInputContainer">
+                <label for="fileInput" id="fileInputLabel">
+                    <span id="fileInputText">Choose files or drag here</span>
+                    <small>Max 200MB per file</small>
+                </label>
+                <input type="file" name="file" id="fileInput" multiple />
+            </div>
+
+            <textarea name="text" id="textInput" placeholder="Enter text to share..."></textarea>
+            
+            <button type="submit">Share Now</button>
+        </form>
+
+        <div id="result">Ready to receive your files...</div>
+
+        <hr>
+        <a href="/download" class="download-link">Go to Download Page</a>
+    </div>
+
+<script>
+const form = document.getElementById('uploadForm');
+const result = document.getElementById('result');
+const fileInputContainer = document.getElementById('fileInputContainer');
+const fileInput = document.getElementById('fileInput');
+const fileInputText = document.getElementById('fileInputText');
+const textInput = document.getElementById('textInput');
+const radios = form.querySelectorAll('input[name="mode"]');
+
+function switchMode(mode) {
+    if (mode === 'file') {
+        fileInputContainer.style.display = 'block';
+        textInput.style.display = 'none';
+        fileInput.setAttribute('required', true);
+        textInput.removeAttribute('required');
+    } else {
+        fileInputContainer.style.display = 'none';
+        textInput.style.display = 'block';
+        fileInput.removeAttribute('required');
+        textInput.setAttribute('required', true);
+    }
+}
+
+radios.forEach(radio => {
+    radio.addEventListener('change', (e) => switchMode(e.target.value));
+});
+
+// Initial state based on checked radio
+switchMode(form.querySelector('input[name="mode"]:checked').value);
+
+// Update file input label with selected file names
+fileInput.addEventListener('change', () => {
+    if (fileInput.files.length > 0) {
+        if (fileInput.files.length === 1) {
+            fileInputText.textContent = fileInput.files[0].name;
+        } else {
+            fileInputText.textContent = `${fileInput.files.length} files selected`;
+        }
+    } else {
+        fileInputText.textContent = 'Choose files or drag here';
+    }
+});
+
+// Copy to clipboard function
+function copyToClipboard(text, button) {
+    navigator.clipboard.writeText(text).then(() => {
+        const original = button.textContent;
+        button.textContent = 'Copied!';
+        setTimeout(() => {
+            button.textContent = original;
+        }, 2000);
+    }).catch(err => {
+        console.error('Failed to copy: ', err);
+        button.textContent = 'Failed';
+    });
+}
+
+form.onsubmit = async (e) => {
+    e.preventDefault();
+    result.innerHTML = "Uploading...";
+    const fd = new FormData(form);
+
+    try {
+        const res = await fetch('/upload', { method: 'POST', body: fd });
+        const data = await res.json();
+
+        if (data.success) {
+            let html = '✅ <strong>Upload Successful!</strong><br><br>';
+            data.uploads.forEach(u => {
+                const safeName = u.name.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+                html += `
+                <div class="upload-item">
+                    <b>${safeName || 'Shared Text'}</b>
+                    <div class="key-line">
+                        Key: ${u.key} 
+                        <button class="copy-btn" onclick="copyToClipboard('${u.key}', this)">Copy</button>
+                    </div>
+                    <div>
+                        <a href="/download/${u.key}" target="_blank">Download Page</a> • 
+                        <a href="${u.link}" target="_blank">Direct Link</a>
+                    </div>
+                </div>
+                `;
+            });
+            result.innerHTML = html;
+        } else {
+            let msg = data.error || 'Upload failed';
+            if (data.details) msg += `<br><small>${JSON.stringify(data.details)}</small>`;
+            result.innerHTML = `❌ <strong>Upload failed:</strong> ${msg}`;
+        }
+    } catch (err) {
+        result.innerHTML = `⚠️ <strong>Error:</strong> ${err.message}`;
+    }
+};
+</script>
+</body>
+</html>
