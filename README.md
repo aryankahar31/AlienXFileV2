@@ -57,7 +57,7 @@
 > **💻 Using Terminal / Command Line**
 > ```bash
 > # 1. Clone the repository
-> git clone https://github.com/yourusername/AlienXFileV2.git
+> git clone https://github.com/aryankahar31/AlienXFileV2.git
 > cd AlienXFileV2
 >
 > # 2. Create a virtual environment
