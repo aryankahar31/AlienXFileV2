@@ -5,7 +5,7 @@
 <h1 align="center">AlienXFile V2 🚀</h1>
 
 <p align="center">
-  A secure, fast, and ephemeral file-sharing platform built with Flask and the Catbox.moe API.
+  A secure, fast, and ephemeral file-sharing platform built with Flask and the litterbox.catbox.moe API.
 </p>
 
 <p align="center">
@@ -33,11 +33,11 @@
 ## 🌟 Key Features
 
 - **Dual Upload Modes:** Share both files and raw text snippets seamlessly.
-- **Secure & Ephemeral:** Files are temporary. No permanent storage on the server.
+- **Secure & Ephemeral:** Files are temporary with customizable expiration (1h to 3 days). No permanent storage on the server.
 - **Unique Access Keys:** Auto-generated 4-digit keys for every upload.
 - **Glassmorphism UI:** Modern, clean, and responsive design that works on any device.
 - **Lightweight & Fast:** Built for speed with no unnecessary bloat.
-- **Large File Support:** Handles uploads up to **200 MB** per file.
+- **Large File Support:** Handles uploads up to **1 GB** per file.
 
 ---
 
@@ -47,7 +47,7 @@
 |--------------|------------------------------------------------------|
 | **Backend** | Python 3.11, Flask 2.x                               |
 | **Frontend** | HTML5, CSS3 (Glassmorphism, Responsive Design)       |
-| **Storage** | [Catbox.moe API](https://catbox.moe/)                |
+| **Storage** | [litterbox.catbox.moe API](https://litterbox.catbox.moe/)                |
 | **Hosting** | PythonAnywhere, Render, Railway, etc.                |
 
 ---

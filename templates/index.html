@@ -142,6 +142,49 @@
             transform: translateY(-1px);
         }
 
+        /* Expiration Select */
+        .expire-section {
+            margin-bottom: 24px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border-radius: 12px;
+            padding: 12px;
+            box-shadow: 0 2px 8px var(--shadow-soft);
+        }
+        .expire-section label {
+            font-weight: 500;
+            color: var(--text-muted);
+            font-size: 14px;
+            white-space: nowrap;
+        }
+        .expire-section select {
+            flex: 1;
+            background: rgba(255, 255, 255, 0.2);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            color: var(--text-color);
+            border-radius: 8px;
+            padding: 8px 12px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        .expire-section select:focus {
+            outline: none;
+            border-color: var(--accent-color);
+            box-shadow: 0 0 0 3px var(--accent-glow);
+        }
+        .expire-section select option {
+            background: var(--text-color);
+            color: white;
+        }
+
         /* Inputs */
         #fileInputContainer, #textInput {
             display: none; /* JS will handle this */
@@ -556,6 +599,7 @@
         @media (max-width: 480px) {
             .card { padding: 32px 24px; }
             .mode-switch { flex-direction: column; }
+            .expire-section { flex-direction: column; align-items: stretch; }
             h2 { font-size: 24px; }
             .about-section { padding: 20px; }
             .features-grid { grid-template-columns: 1fr; }
@@ -578,10 +622,20 @@
                 <label for="modeText">Text Share</label>
             </div>
 
+            <div class="expire-section">
+                <label for="expire">Expire after:</label>
+                <select name="expire" id="expire">
+                    <option value="1h">1 Hour</option>
+                    <option value="12h">12 Hours</option>
+                    <option value="24h">1 Day</option>
+                    <option value="72h">3 Days</option>
+                </select>
+            </div>
+
             <div id="fileInputContainer">
                 <label for="fileInput" id="fileInputLabel">
                     <span id="fileInputText">Choose files or drag here</span>
-                    <small>Max 200MB per file</small>
+                    <small>Max 1GB per file</small>
                 </label>
                 <input type="file" name="file" id="fileInput" multiple />
             </div>
@@ -606,7 +660,7 @@
                 <h3>About AlienXFile V2</h3>
             </div>
             
-            <p>AlienXFile V2 is a secure, fast, and temporary file/text sharing platform built with Python and Flask. Users can upload files or text, receive a unique 4-digit key, and download content via the Catbox.moe API. All uploads are temporary and automatically removed, ensuring privacy and security.</p>
+            <p>AlienXFile V2 is a secure, fast, and temporary file/text sharing platform built with Python and Flask, using litterbox.catbox.moe for reliable temporary file handling with customizable expiration (1h to 3 days).</p>
             
             <div class="features-grid">
                 <div class="feature-card">
@@ -616,7 +670,7 @@
                         </svg>
                     </div>
                     <h4>Easy Upload</h4>
-                    <p>Upload files up to 200MB or share text with a simple interface</p>
+                    <p>Upload files up to 1GB or share text with a simple interface</p>
                 </div>
                 <div class="feature-card">
                     <div class="feature-icon">
@@ -634,7 +688,7 @@
                         </svg>
                     </div>
                     <h4>Temporary Storage</h4>
-                    <p>Files expire automatically, ensuring your privacy and security</p>
+                    <p>Custom expiration options ensure your privacy and security</p>
                 </div>
                 <div class="feature-card">
                     <div class="feature-icon">
@@ -650,7 +704,7 @@
             <div class="tech-stack">
                 <span class="tech-badge">Python</span>
                 <span class="tech-badge">Flask</span>
-                <span class="tech-badge">Catbox.moe API</span>
+                <span class="tech-badge">Litterbox API</span>
                 <span class="tech-badge">HTML5</span>
                 <span class="tech-badge">CSS3</span>
                 <span class="tech-badge">JavaScript</span>
