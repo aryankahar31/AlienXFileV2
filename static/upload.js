@@ -239,7 +239,7 @@ form.addEventListener("submit", async event => {
                 if (!response || typeof response !== "object") throw new Error("Invalid server response. Verify before retrying.");
                 const uploads = Array.isArray(response.uploads) ? response.uploads : [];
                 const errors = Array.isArray(response.errors) ? response.errors.filter(error => typeof error === "string") : [];
-                if (typeof response.error === "string" && response.error) errors.push(response.error);
+                if (typeof response.error === "string" && response.error) errors.push(`${name}: ${response.error}`);
                 for (const upload of uploads) {
                     try {
                         renderUpload(upload, batch);
@@ -248,7 +248,7 @@ form.addEventListener("submit", async event => {
                         addError(`${name}: Invalid share details returned. The item may have been stored; verify before retrying.`);
                     }
                 }
-                for (const error of errors) addError(`${name}: ${error}`);
+                for (const error of errors) addError(error);
                 if ((xhr.status < 200 || xhr.status >= 300) && !errors.length) addError(`${name}: ${httpError}`);
                 else if (!uploads.length && !errors.length) addError(`${name}: No completed upload was returned.`);
                 else if (response.success !== true && !errors.length) addError(`${name}: The server reported a failure; any completed uploads are shown above.`);
@@ -267,6 +267,7 @@ form.addEventListener("submit", async event => {
         switchMode();
         progress.hidden = true;
         cancel.hidden = true;
+        document.getElementById("cancelNotice").hidden = !cancelled;
         if (cancelled) form.querySelector('button[type="submit"]').focus();
     }
 });

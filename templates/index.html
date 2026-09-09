@@ -739,7 +739,7 @@
                 <h3>About AlienXFile V2</h3>
             </div>
 
-            <p>AlienXFile V2 is a temporary file/text sharing platform built with Python and Flask, using litterbox.catbox.moe for temporary file storage with expiration options from 1 hour to 3 days.</p>
+            <p>AlienXFile V2 is a temporary file/text sharing platform built with Python and Flask, using {{ storage_provider }} for file storage with share expiration options from 1 hour to 3 days.</p>
 
             <div class="features-grid">
                 <div class="feature-card">
@@ -783,7 +783,7 @@
             <div class="tech-stack">
                 <span class="tech-badge">Python</span>
                 <span class="tech-badge">Flask</span>
-                <span class="tech-badge">Litterbox API</span>
+                <span class="tech-badge">{{ storage_provider }}</span>
                 <span class="tech-badge">HTML5</span>
                 <span class="tech-badge">CSS3</span>
                 <span class="tech-badge">JavaScript</span>

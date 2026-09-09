@@ -1,16 +1,16 @@
 # AlienXFile V2
 
-Temporary file and text sharing built with Flask, PostgreSQL (or SQLite for local/PythonAnywhere use), and the [Litterbox API](https://litterbox.catbox.moe/). The responsive upload and download pages use HTML, CSS, and JavaScript, with no frontend build step.
+Temporary file and text sharing built with Flask, PostgreSQL (or SQLite for local/PythonAnywhere use), and private [Vercel Blob](https://vercel.com/docs/vercel-blob) storage. The responsive pages use HTML, CSS, and JavaScript, with no frontend build step. The original Litterbox integration remains available when no Blob token is configured.
 
 - Share files or text using a five-digit code, including leading zeros, or a share link.
 - Choose expiration after 1, 12, 24, or 72 hours.
 - Copy a link or scan a QR code generated locally by the app; no external QR service receives the link.
-- Select multiple files; the browser uploads them sequentially, with one file per `/upload` API request. Each file is then forwarded by Flask to Litterbox.
-- View share details at `/share/<code>`. `/download` accepts a code; `/download/<code>` redirects file downloads to Litterbox or displays shared text.
-- Text is limited to 100,000 characters and stored in the database. File metadata, provider URLs, codes, expiration times, and per-IP rate-limit records also live there; file payloads remain on Litterbox.
+- Select multiple files; the browser uploads them sequentially, with one file per `/upload` API request. Flask streams each file to the configured storage provider.
+- View share details at `/share/<code>`. `/download` accepts a code; `/download/<code>` streams private files after checking expiry, redirects legacy Litterbox files, or displays shared text.
+- Text is limited to 100,000 characters and stored in the database. File metadata, provider URLs, codes, expiration times, and per-IP rate-limit records also live there; file payloads remain in the configured object store.
 - Uploads require JavaScript. Code lookup and the download/details page work without it; copying and local-time formatting are progressive enhancements.
 
-The progress bar measures browser-to-app transfer only. Reaching 100% does not mean Litterbox has accepted the file. Cancel stops the browser request and remaining queue, but does not delete a file the server has already stored or may still finish storing.
+The progress bar measures browser-to-app transfer only. Reaching 100% does not mean the storage provider has accepted the file. Cancel stops the browser request and remaining queue, but does not delete a file the server has already stored or may still finish storing.
 
 ## Upload Limits
 
@@ -63,11 +63,12 @@ Local tests are not evidence that Render, PythonAnywhere, or Litterbox accepts a
 
 ## Render Free + Neon Free
 
-The Render service **AlienXFileV2** is at <https://alienxfilev2.onrender.com>, linked to <https://github.com/aryankahar31/AlienXFileV2>. This configuration uses Render's Free instance and an external Neon database, not a paid disk. Database credentials belong only in the service's secret environment variables, never in the repository.
+The Render service **AlienXFileV2** is at <https://alienxfilev2.onrender.com>, linked to <https://github.com/aryankahar31/AlienXFileV2>. This configuration uses Render Free, an external Neon database, and a private Vercel Blob store on the Hobby plan, not a paid disk. Credentials belong only in the service's secret environment variables, never in the repository. Litterbox returned HTTP 403 during live verification, so this deployment uses Vercel Blob instead.
 
 - [Neon Free pricing](https://neon.com/pricing) currently requires no credit card and includes 0.5 GB storage per project and 100 CU-hours per project per month. It is not a time-limited trial, but quotas and scale-to-zero still apply; monitor database usage, including shared text and rate-limit rows.
 - [Render Free services](https://render.com/docs/free) sleep after 15 minutes without inbound traffic and can take about a minute to wake. Filesystem changes are lost on sleep, restart, or redeploy, and Free has no persistent disk. Neon keeps database state outside the web service; temporary upload files are not durable.
 - Avoid **Render Free Postgres**, which expires after 30 days. Render Free web services share 750 instance hours per workspace per month. Outbound bandwidth and build-pipeline allowances depend on current workspace limits; check the dashboard rather than assuming a fixed 5 GB allowance. Forwarding files to Litterbox consumes outbound traffic, and unusually high service-initiated traffic can also trigger suspension. Without a payment method, exhausted allowances can suspend services or disable new builds; with one, overages can be billed. Do not add payment details or upgrade under the free-only choice.
+- [Vercel Blob Hobby](https://vercel.com/docs/vercel-blob/usage-and-pricing#hobby) is free within its quotas and blocks usage instead of charging overages. Blob quotas are shared across the account's stores. Private file downloads pass through Render, so both services' transfer limits apply.
 
 `render.yaml` describes `name: AlienXFileV2`, `plan: free`, `region: singapore`, Python 3.14.3, build command `pip install -r requirements.txt`, `DATABASE_URL` with `sync: false` (secret supplied separately), and `ALIENX_UPLOAD_MAX_BYTES: '95000000'`. Its start command is:
 
@@ -81,9 +82,10 @@ PostgreSQL schema initialization is explicit: `init-db` must succeed before work
 
 1. Sign up at <https://neon.com/signup>, select **Free**, and create a project in the available region nearest Render Singapore (Singapore if offered). Do not select a paid plan or add a card; stop if free setup is unavailable.
 2. In Neon's project **Connect** dialog, select the database/role and enable connection pooling. Copy the pooled PostgreSQL connection URL with TLS required (`sslmode=require`; preserve any additional security parameters Neon supplies). Put the actual URL only in the existing Render service's dashboard secret environment variable `DATABASE_URL`, never in chat, source, `render.yaml`, screenshots, or logs.
-3. Before publishing, update the existing Render service settings to match the prepared configuration: Free instance, `PYTHON_VERSION=3.14.3`, project-root working directory, the build/start commands above, and `ALIENX_UPLOAD_MAX_BYTES=95000000`. Confirm the region is Singapore; if changing it requires a replacement service, obtain authorization first. Render supplies `RENDER=true` and `RENDER_SERVICE_TYPE=web`. Disable automatic deploys while preparing settings so a repository update cannot publish prematurely. A Blueprint file does **not** automatically update an existing dashboard-configured service unless that service is managed by the Blueprint.
-4. Publish reviewed changes to the intended repository/branch and manually deploy the existing service. Confirm schema initialization succeeds before Gunicorn starts. No second web service, Render database, or paid resource is needed.
-5. Verify a small text share and a small file upload/download over HTTPS, five-digit lookup (including leading zeros), and QR links. Restart the service and confirm unexpired shares still work from Neon. Check rate limits from two different client IPs so clients do not all share the proxy's allowance; excess requests must return 429 with `Retry-After`. Inspect global security/cache headers on success and error responses without logging credentials or tokens. These smoke checks do not verify 95 MB or 1 GB transfers.
+3. Create a **Private** Vercel Blob store in Singapore (`sin1`) on a Hobby account. Set its static read/write token in Render as `BLOB_READ_WRITE_TOKEN`. Do not put that token in browser code or use a public store. The app derives the allowed private hostname from the token, and never sends the token to arbitrary download URLs. Without this setting, uploads use Litterbox, which may reject the deployment's requests.
+4. Before publishing, update the existing Render service settings to match the configuration: Free instance, `PYTHON_VERSION=3.14.3`, project-root working directory, the build/start commands above, and `ALIENX_UPLOAD_MAX_BYTES=95000000`. Confirm the region is Singapore; if changing it requires a replacement service, obtain authorization first. Render supplies `RENDER=true` and `RENDER_SERVICE_TYPE=web`. Disable automatic deploys while preparing settings so a repository update cannot publish prematurely. A Blueprint file does **not** automatically update an existing dashboard-configured service unless that service is managed by the Blueprint.
+5. Publish reviewed changes to the intended repository/branch and manually deploy the existing service. Confirm schema initialization succeeds before Gunicorn starts. No second web service, Render database, or paid resource is needed.
+6. Verify a small text share and a small file upload/download over HTTPS, five-digit lookup (including leading zeros), and QR links. Restart the service and confirm unexpired shares still work from Neon. Check rate limits from two different client IPs so clients do not all share the proxy's allowance; excess requests must return 429 with `Retry-After`. Inspect global security/cache headers on success and error responses without logging credentials or tokens. These smoke checks do not verify 95 MB or 1 GB transfers.
 
 ## PythonAnywhere Setup
 
@@ -146,20 +148,22 @@ With no `DATABASE_URL`, local/PythonAnywhere SQLite is auto-created on the first
 
 Codes held only in RAM by the previous version cannot migrate automatically. This is a one-time deployment transition: users must create new uploads. Afterward, SQLite-backed shares survive worker restarts and code reloads until their expiry, provided the database is preserved; file availability still depends on Litterbox.
 
-On either backend, expired share rows are cleaned opportunistically when saving a new share and when accessing an expired share. Expired rate-limit windows are cleaned on rate-limited requests. There is no background cleanup worker, and expired content may remain in the database until cleanup runs. A scheduler is not required for normal operation. For **SQLite only**, if you need cleanup during idle periods, this optional command can be run from a Bash console or a PythonAnywhere scheduled task:
+On either backend, expired shares are cleaned in batches of 50 when saving a new share or accessing an expired share. Private Blob objects are deleted before their metadata; failed deletions retain the metadata for retry. Access is denied immediately at expiry, even when deletion is delayed. There is no background cleanup worker. With the same database and storage environment configured, this command runs one batch during idle periods:
 
 ```bash
-/home/ALIENXFILEV2/venv/bin/python -c "import sqlite3, time; db = sqlite3.connect('/home/ALIENXFILEV2/shares.sqlite3', timeout=10); db.execute('DELETE FROM shares WHERE expires <= ?', (time.time(),)); db.execute('DELETE FROM rate_limits WHERE started <= ?', (time.time() - 600,)); db.commit(); db.close()"
+flask --app flask_app cleanup-shares
 ```
 
-Back up SQLite using its backup API/tooling, or stop writes before making a filesystem copy. Keep backups outside static mappings and code replacement, restrict access, and choose a retention policy: backups can retain shared text, metadata, and IP records after live expiry. Deleting rows does not securely erase disk contents or necessarily shrink the SQLite file; monitor disk usage and plan maintenance accordingly. These backups do not contain file payloads hosted by Litterbox.
+For a backlog, run additional batches or schedule this command. Do not delete private-file metadata with raw SQL, because that loses the object URL needed for cleanup. Upload timeouts or process crashes can leave orphan objects; monitor the dedicated Blob store and reconcile objects without active metadata. A failed database save triggers best-effort deletion of its newly uploaded object. Already downloaded copies cannot be revoked.
+
+Back up SQLite using its backup API/tooling, or stop writes before making a filesystem copy. Keep backups outside static mappings and code replacement, restrict access, and choose a retention policy: backups can retain shared text, metadata, and IP records after live expiry. Deleting rows does not securely erase disk contents or necessarily shrink the SQLite file; monitor disk usage and plan maintenance accordingly. These backups do not contain file payloads hosted by the object store.
 
 SQLite's short write transactions suit a small site, but writes serialize and can contend. Before production use, confirm filesystem locking support and behavior on your PythonAnywhere plan, test expected concurrent load, and monitor database errors. The connection waits up to 10 seconds for locks; database failures can return 503. Sustained write contention calls for a server database, not an assumption that more Web workers remove the limit.
 
 ## Access And Privacy
 
 - Five-digit codes are convenient identifiers, **not passwords or encryption**. Anyone who knows or guesses a live code or obtains a link can access the share. Do not upload passwords, credentials, or other sensitive data.
-- File bytes pass through the app host, including temporary upload storage, and are sent to third-party Litterbox storage. Shared text is stored directly in the configured database. This is not end-to-end encryption, zero-storage hosting, or a no-logging service; hosting/provider logs and backups may retain information.
+- File bytes pass through the app host, including temporary upload storage, and are sent to Vercel Blob (or Litterbox when no Blob token is configured). Private files are streamed as attachments through the app after expiry checks; the browser never receives the storage token. Shared text is stored directly in the configured database. This is not end-to-end encryption, zero-storage hosting, or a no-logging service; hosting/provider logs and backups may retain information.
 - Expiry blocks access through this app; provider retention is separate, and neither expiry nor cancellation can recall downloaded copies. Keep your own backup of anything important. Availability can end before the selected expiry.
 - Limits are **10 upload requests per IP per 600 seconds** and **30 lookup requests per IP per 600 seconds**, using separate fixed windows stored in the configured database. Failed requests also count. A valid code-form POST followed by its redirect to the details page counts as **two lookups**; fetching its QR code or clicking the file download link counts as another. Requests beyond the allowance return 429 with `Retry-After`.
 - Each file sent from the browser queue consumes one upload request; files rejected locally do not. Users behind a shared NAT/IP share the allowance, and fixed-window limits are not a substitute for authentication or comprehensive abuse protection.

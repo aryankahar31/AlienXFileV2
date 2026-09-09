@@ -30,6 +30,7 @@ if not 0 < upload_max_bytes <= MAX_FILE_BYTES:
 app.config.update(
     DATABASE=os.environ.get('ALIENX_DATABASE', str(Path(__file__).with_name('shares.sqlite3'))),
     DATABASE_URL=os.environ.get('DATABASE_URL'),
+    BLOB_READ_WRITE_TOKEN=os.environ.get('BLOB_READ_WRITE_TOKEN', '').strip(),
     UPLOAD_MAX_BYTES=upload_max_bytes,
     MAX_CONTENT_LENGTH=upload_max_bytes + 1_000_000,
     MAX_FORM_MEMORY_SIZE=500_000,
@@ -45,6 +46,7 @@ if os.environ.get('RENDER') == 'true' and not app.config['DATABASE_URL']:
     raise RuntimeError('Set DATABASE_URL to a persistent PostgreSQL database before starting on Render.')
 expire_seconds = {'1h': 3600, '12h': 43200, '24h': 86400, '72h': 259200}
 banned_exts = {'.exe', '.scr', '.cpl', '.jar', '.bat', '.cmd', '.com', '.pif', '.vbs', '.wsf'}
+BLOB_API = 'https://vercel.com/api/blob'
 SCHEMA = '''
     CREATE TABLE IF NOT EXISTS shares (
         key TEXT PRIMARY KEY, type TEXT NOT NULL, name TEXT NOT NULL,
@@ -101,7 +103,56 @@ def template_settings():
     limit = app.config['UPLOAD_MAX_BYTES']
     return dict(upload_max_bytes=limit,
                 upload_limit_label='1 GB' if limit == MAX_FILE_BYTES else f'{limit / 1_000_000:g} MB',
-                max_text_length=app.config['MAX_TEXT_LENGTH'], banned_exts=sorted(banned_exts))
+                max_text_length=app.config['MAX_TEXT_LENGTH'], banned_exts=sorted(banned_exts),
+                storage_provider='Vercel Blob' if app.config['BLOB_READ_WRITE_TOKEN'] else 'Litterbox')
+
+
+def blob_headers():
+    token = app.config['BLOB_READ_WRITE_TOKEN']
+    parts = token.split('_')
+    if len(parts) < 5 or parts[:3] != ['vercel', 'blob', 'rw'] or not parts[3].isalnum():
+        raise ValueError('Private storage is not configured correctly.')
+    return {'Authorization': 'Bearer ' + token, 'x-api-version': '12',
+            'x-vercel-blob-store-id': parts[3]}
+
+
+def checked_blob_url(url):
+    host = blob_headers()['x-vercel-blob-store-id'].lower() + '.private.blob.vercel-storage.com'
+    if not isinstance(url, str) or not re.fullmatch(
+        r'https://' + re.escape(host) + r'/shares/[a-f0-9]{32}/[A-Za-z0-9_.-]+', url
+    ):
+        raise ValueError('Invalid private storage URL.')
+    return url
+
+
+def delete_blobs(urls):
+    with requests.post(BLOB_API + '/delete', headers=blob_headers(),
+                       json={'urls': [checked_blob_url(url) for url in urls]},
+                       timeout=(10, 30), allow_redirects=False) as response:
+        if not 200 <= response.status_code < 300:
+            raise requests.HTTPError('Private storage cleanup failed.', response=response)
+
+
+def cleanup_expired(db):
+    # ponytail: request-driven cleanup leaves idle/orphan objects; schedule cleanup and reconcile the store at scale.
+    rows = query(db, 'SELECT key, type, url, expires FROM shares WHERE expires <= ? ORDER BY expires LIMIT 50',
+                 (time.time(),)).fetchall()
+    urls = [row['url'] for row in rows if row['type'] == 'file'
+            and not (row['url'] or '').startswith('https://litter.catbox.moe/')]
+    try:
+        if urls:
+            delete_blobs(urls)
+    except (requests.RequestException, ValueError):
+        logger.warning('Private storage cleanup deferred; expired shares remain inaccessible.')
+        return
+    with transaction(db):
+        for row in rows:
+            query(db, 'DELETE FROM shares WHERE key = ? AND expires = ?', (row['key'], row['expires']))
+
+
+@app.cli.command('cleanup-shares')
+def cleanup_shares():
+    cleanup_expired(get_db())
 
 
 def error_response(message, status):
@@ -172,8 +223,8 @@ def share_details(row):
 
 def save_share(kind, name, size, expires, content=None, url=None):
     db = get_db()
+    cleanup_expired(db)
     with transaction(db):
-        query(db, 'DELETE FROM shares WHERE expires <= ?', (time.time(),))
         for _ in range(100):
             key = f'{secrets.randbelow(100_000):05d}'
             inserted = query(db, '''INSERT INTO shares VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -235,6 +286,7 @@ def upload():
         if Path(filename).suffix.lower() in banned_exts:
             errors.append(f'{filename}: This file extension is blocked.')
             continue
+        stored_blob = None
         try:
             file.stream.seek(0, 2)
             size = file.stream.tell()
@@ -242,25 +294,47 @@ def upload():
             if size > app.config['UPLOAD_MAX_BYTES']:
                 errors.append(f'{filename}: File exceeds the {template_settings()["upload_limit_label"]} limit.')
                 continue
-            # Stream the existing temporary file; requests' files= would buffer the full multipart body.
-            body = MultipartEncoder(fields={
-                'reqtype': 'fileupload', 'time': expiry,
-                'fileToUpload': (filename, file.stream, 'application/octet-stream'),
-            })
             expires = time.time() + expire_seconds[expiry]
-            with requests.post(
-                'https://litterbox.catbox.moe/resources/internals/api.php', data=body,
-                headers={'Content-Type': body.content_type}, timeout=(10, 180), allow_redirects=False,
-            ) as response:
-                response.raise_for_status()
-                link = response.text.strip()
-                if response.status_code != 200 or not re.fullmatch(
-                    r'https://litter\.catbox\.moe/[A-Za-z0-9][A-Za-z0-9._-]*', link
-                ):
-                    raise ValueError('Storage provider returned an invalid file link.')
+            if app.config['BLOB_READ_WRITE_TOKEN']:
+                with requests.put(BLOB_API + '/',
+                                  params={'pathname': f'shares/{secrets.token_hex(16)}/{filename}'},
+                                  data=file.stream if size else b'', headers={
+                                      **blob_headers(), 'Content-Length': str(size),
+                                      'Content-Type': 'application/octet-stream',
+                                      'x-content-type': 'application/octet-stream',
+                                      'x-vercel-blob-access': 'private', 'x-add-random-suffix': '0',
+                                      'x-allow-overwrite': '0', 'x-cache-control-max-age': '60',
+                                  }, timeout=(10, 180), allow_redirects=False) as response:
+                    response.raise_for_status()
+                    result = response.json()
+                    if not 200 <= response.status_code < 300 or not isinstance(result, dict):
+                        raise ValueError('Invalid private storage response.')
+                    stored_blob = link = checked_blob_url(result.get('url'))
+            else:
+                # Stream the temporary file; requests' files= would buffer the full multipart body.
+                body = MultipartEncoder(fields={
+                    'reqtype': 'fileupload', 'time': expiry,
+                    'fileToUpload': (filename, file.stream, 'application/octet-stream'),
+                })
+                with requests.post(
+                    'https://litterbox.catbox.moe/resources/internals/api.php', data=body,
+                    headers={'Content-Type': body.content_type}, timeout=(10, 180), allow_redirects=False,
+                ) as response:
+                    response.raise_for_status()
+                    link = response.text.strip()
+                    if response.status_code != 200 or not re.fullmatch(
+                        r'https://litter\.catbox\.moe/[A-Za-z0-9][A-Za-z0-9._-]*', link
+                    ):
+                        raise ValueError('Storage provider returned an invalid file link.')
             uploads.append(save_share('file', filename, size, expires, url=link))
         except (requests.RequestException, ValueError, OSError, sqlite3.Error, psycopg.Error) as exc:
-            logger.warning('Upload failed (%s)', type(exc).__name__)
+            if stored_blob:
+                try:
+                    delete_blobs([stored_blob])
+                except (requests.RequestException, ValueError):
+                    logger.warning('An unregistered private upload needs storage cleanup.')
+            logger.warning('Upload failed (%s; upstream status=%s)', type(exc).__name__,
+                           getattr(getattr(exc, 'response', None), 'status_code', None))
             errors.append(f'{filename}: Upload could not be completed. The storage provider or server may be unavailable.')
     return jsonify(success=bool(uploads), uploads=uploads, errors=errors), 200 if uploads else 400
 
@@ -276,11 +350,25 @@ def download_share(key):
     if row is None:
         return error_response('Invalid or expired code. Check the code or ask for a new share.', 404)
     if row['expires'] <= time.time():
-        with transaction(db):
-            query(db, 'DELETE FROM shares WHERE key = ? AND expires <= ?', (key, time.time()))
+        cleanup_expired(db)
         return error_response('This share has expired. Ask the sender to upload it again.', 410)
     if request.endpoint == 'download_direct' and row['type'] == 'file':
-        return redirect(row['url'])
+        if (row['url'] or '').startswith('https://litter.catbox.moe/'):
+            return redirect(row['url'])
+        try:
+            upstream = requests.get(checked_blob_url(row['url']),
+                                    headers={'Authorization': blob_headers()['Authorization'], 'Accept-Encoding': 'identity'},
+                                    stream=True, timeout=(10, 60), allow_redirects=False)
+        except (requests.RequestException, ValueError):
+            return error_response('File storage is temporarily unavailable. Please try again.', 502)
+        if upstream.status_code != 200:
+            upstream.close()
+            return error_response('This file is unavailable from storage. Ask the sender to share it again.', 502)
+        response = Response(upstream.iter_content(chunk_size=64 * 1024), content_type='application/octet-stream')
+        response.headers.set('Content-Disposition', 'attachment', filename=secure_filename(row['name']) or 'download')
+        response.headers['Content-Length'] = str(row['size'])
+        response.call_on_close(upstream.close)
+        return response
     if request.endpoint == 'share_qr':
         image = qrcode.make(url_for('download_details', key=key, _external=True), image_factory=SvgPathImage)
         output = BytesIO()

@@ -32,7 +32,7 @@ class PostgresTest(unittest.TestCase):
         self.addCleanup(admin.execute, sql.SQL('DROP SCHEMA {} CASCADE').format(sql.Identifier(schema)))
         contexts = ExitStack()
         self.addCleanup(contexts.close)
-        contexts.enter_context(patch.dict(app.config, TESTING=True, DATABASE_URL=self.dsn,
+        contexts.enter_context(patch.dict(app.config, TESTING=True, DATABASE_URL=self.dsn, BLOB_READ_WRITE_TOKEN='',
                                     DATABASE=':memory:', UPLOAD_RATE_LIMIT=1000,
                                     LOOKUP_RATE_LIMIT=1000, RATE_WINDOW_SECONDS=60,
                                     TRUST_PYTHONANYWHERE_PROXY=False, TRUST_RENDER_PROXY=False))

@@ -44,7 +44,7 @@ class DownloadTest(unittest.TestCase):
         self.database = str(Path(directory.name) / 'shares.sqlite3')
         contexts = ExitStack()
         self.addCleanup(contexts.close)
-        contexts.enter_context(patch.dict(app.config, TESTING=True, DATABASE=self.database, DATABASE_URL=None,
+        contexts.enter_context(patch.dict(app.config, TESTING=True, DATABASE=self.database, DATABASE_URL=None, BLOB_READ_WRITE_TOKEN='',
                                      UPLOAD_RATE_LIMIT=1000, LOOKUP_RATE_LIMIT=1000,
                                      RATE_WINDOW_SECONDS=60, TRUST_PYTHONANYWHERE_PROXY=False, TRUST_RENDER_PROXY=False))
         self.now = 1_800_000_000
@@ -532,6 +532,86 @@ with patch('flask_app.time.time', return_value=float(sys.argv[2])), patch(
             self.assertEqual(config['forwarded_allow_ips'], expected)
             self.assertEqual(config['forwarder_headers'], '')
             self.assertEqual(config['secure_scheme_headers'], {'X-FORWARDED-PROTO': 'https'} if render else {})
+
+    def test_private_blob_streaming_download_and_expired_cleanup(self):
+        token = 'vercel_blob_rw_teststore_fakecredential'
+        url = 'https://teststore.private.blob.vercel-storage.com/shares/' + 'a' * 32 + '/report.pdf'
+        self.mock_provider()
+        with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=token), \
+                patch('flask_app.requests.put') as put, patch('flask_app.requests.get') as get:
+            put.return_value.__enter__.return_value.status_code = 200
+            put.return_value.__enter__.return_value.json.return_value = {'url': url}
+            response = self.client.post('/upload', data={'file': (BytesIO(b'PDF bytes'), 'report.pdf')})
+            self.assertEqual(response.status_code, 200)
+            share = response.get_json()['uploads'][0]
+            self.assertEqual(put.call_args.kwargs['headers']['x-vercel-blob-access'], 'private')
+            self.assertEqual(put.call_args.kwargs['headers']['Content-Length'], '9')
+            self.assertNotIsInstance(put.call_args.kwargs['data'], bytes)
+            self.assertFalse(put.call_args.kwargs['allow_redirects'])
+            self.assertNotIn(token.encode(), response.data)
+            upstream = get.return_value
+            upstream.status_code = 200
+            upstream.iter_content.return_value = iter([b'PDF ', b'bytes'])
+            downloaded = self.client.get('/download/' + share['key'])
+            self.assertEqual(downloaded.status_code, 200)
+            self.assertEqual(downloaded.data, b'PDF bytes')
+            self.assertEqual(downloaded.headers['Content-Length'], '9')
+            self.assertIn('attachment;', downloaded.headers['Content-Disposition'])
+            self.assertEqual(downloaded.headers['Cache-Control'], 'no-store')
+            self.assertEqual(get.call_args.args[0], url)
+            self.assertEqual(get.call_args.kwargs['headers']['Authorization'], 'Bearer ' + token)
+            self.assertFalse(get.call_args.kwargs['allow_redirects'])
+            downloaded.close()
+            upstream.close.assert_called_once()
+            self.clock.return_value = self.now + 3600
+            self.assertEqual(self.client.get('/download/' + share['key']).status_code, 410)
+            self.assertEqual(self.post.call_args.args[0], 'https://vercel.com/api/blob/delete')
+            self.assertEqual(self.post.call_args.kwargs['json'], {'urls': [url]})
+            self.assertEqual(self.client.get('/download/' + share['key']).status_code, 404)
+
+    def test_private_blob_cleanup_failure_keeps_metadata_for_retry(self):
+        token = 'vercel_blob_rw_teststore_fakecredential'
+        url = 'https://teststore.private.blob.vercel-storage.com/shares/' + 'a' * 32 + '/report.pdf'
+        with app.app_context():
+            db = get_db()
+            with db:
+                db.execute('INSERT INTO shares VALUES (?, ?, ?, ?, ?, ?, ?)',
+                           ('00007', 'file', 'report.pdf', None, url, 9, self.now - 1))
+        with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=token):
+            self.mock_provider(status=503)
+            self.assertEqual(self.client.get('/download/00007').status_code, 410)
+            with app.app_context():
+                self.assertIsNotNone(get_db().execute('SELECT key FROM shares WHERE key = ?', ('00007',)).fetchone())
+            self.mock_provider(status=200)
+            self.assertEqual(self.client.get('/download/00007').status_code, 410)
+            self.assertEqual(self.client.get('/download/00007').status_code, 404)
+
+    def test_private_blob_never_sends_token_to_untrusted_url(self):
+        token = 'vercel_blob_rw_teststore_fakecredential'
+        prefix = 'https://teststore.private.blob.vercel-storage.com/shares/' + 'a' * 32
+        with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=token), patch('flask_app.requests.get') as get:
+            for url in ('https://evil.example/file', prefix + '/a.pdf?redirect=1',
+                        prefix + '/a\nb.pdf', prefix.replace('teststore.', 'otherstore.') + '/a.pdf'):
+                with app.app_context():
+                    db = get_db()
+                    with db:
+                        db.execute('INSERT OR REPLACE INTO shares VALUES (?, ?, ?, ?, ?, ?, ?)',
+                                   ('00007', 'file', 'report.pdf', None, url, 9, self.now + 3600))
+                self.assertEqual(self.client.get('/download/00007').status_code, 502)
+            get.assert_not_called()
+
+    def test_private_blob_removed_when_metadata_cannot_be_saved(self):
+        url = 'https://teststore.private.blob.vercel-storage.com/shares/' + 'a' * 32 + '/report.pdf'
+        self.mock_provider()
+        with patch.dict(app.config, BLOB_READ_WRITE_TOKEN='vercel_blob_rw_teststore_fakecredential'), \
+                patch('flask_app.requests.put') as put, \
+                patch('flask_app.save_share', side_effect=sqlite3.OperationalError('database unavailable')):
+            put.return_value.__enter__.return_value.status_code = 200
+            put.return_value.__enter__.return_value.json.return_value = {'url': url}
+            response = self.client.post('/upload', data={'file': (BytesIO(b'PDF bytes'), 'report.pdf')})
+            self.assertEqual(response.status_code, 400)
+            self.assertFalse(response.get_json()['success'])
+            self.assertEqual(self.post.call_args.kwargs['json'], {'urls': [url]})
 
     def test_error_pages_offer_explicit_download_form(self):
         for method, path, status in (('GET', '/missing', 404), ('GET', '/share/99999', 404),
