@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: AlienXFileV2
+    runtime: python
+    plan: free
+    region: singapore
+    buildCommand: pip install -r requirements.txt
+    startCommand: flask --app flask_app init-db && gunicorn flask_app:app
+    healthCheckPath: /
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.14.3
+      - key: DATABASE_URL
+        sync: false
+      - key: ALIENX_UPLOAD_MAX_BYTES
+        value: "95000000"

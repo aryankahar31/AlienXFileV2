@@ -1,524 +1,277 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8" />
+    <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="referrer" content="no-referrer">
     <title>AlienX Download</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=SF+Pro+Display:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
         :root {
             --accent-color: #A7C7E7;
-            --accent-glow: rgba(167, 199, 231, 0.3);
             --bg-start: #F5F7FA;
             --bg-end: #C3CFE2;
-            --card-bg: rgba(255, 255, 255, 0.25);
-            --card-border: rgba(255, 255, 255, 0.4);
-            --shadow-soft: rgba(0, 0, 0, 0.05);
-            --shadow-deep: rgba(0, 0, 0, 0.1);
             --text-color: #1D1D1F;
-            --text-muted: #6E6E73;
+            --text-muted: #454B56;
+            --link-color: #234D7B;
+            --focus-color: #174B86;
+            --error-color: #9B2525;
         }
 
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+        * { box-sizing: border-box; }
 
         body {
-            font-family: 'SF Pro Display', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            background: linear-gradient(135deg, var(--bg-start), var(--bg-end));
-            color: var(--text-color);
+            margin: 0;
+            min-height: 100vh;
+            padding: 24px 16px;
             display: grid;
             place-items: center;
-            min-height: 100vh;
-            padding: 20px;
-            position: relative;
-            overflow: hidden;
-        }
-
-        body::before {
-            content: '';
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: radial-gradient(circle at 20% 80%, rgba(167, 199, 231, 0.1) 0%, transparent 50%),
-                        radial-gradient(circle at 80% 20%, rgba(255, 255, 255, 0.1) 0%, transparent 50%);
-            pointer-events: none;
-            z-index: -1;
+            background: linear-gradient(135deg, var(--bg-start), var(--bg-end));
+            color: var(--text-color);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            line-height: 1.6;
         }
 
         .box {
-            background: var(--card-bg);
+            width: 100%;
+            min-width: 0;
+            max-width: 560px;
+            padding: 36px;
+            background: rgba(255, 255, 255, 0.7);
+            border: 1px solid rgba(255, 255, 255, 0.8);
+            border-radius: 24px;
             backdrop-filter: blur(40px);
             -webkit-backdrop-filter: blur(40px);
-            border: 1px solid var(--card-border);
-            border-radius: 24px;
-            width: 100%;
-            max-width: 450px;
-            padding: 40px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.05), 0 2px 16px rgba(0, 0, 0, 0.1);
             text-align: center;
-            box-shadow: 
-                0 8px 32px var(--shadow-soft),
-                0 2px 16px var(--shadow-deep),
-                inset 0 1px 0 rgba(255, 255, 255, 0.2);
-            animation: floatIn 0.8s ease-out;
-            position: relative;
-        }
-
-        .box::after {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            height: 1px;
-            background: linear-gradient(to right, transparent, rgba(255, 255, 255, 0.4), transparent);
-            pointer-events: none;
+            overflow-wrap: anywhere;
+            animation: floatIn 0.5s ease-out;
         }
 
         @keyframes floatIn {
-            from { 
-                opacity: 0; 
-                transform: translateY(30px) scale(0.95); 
-            }
-            to { 
-                opacity: 1; 
-                transform: translateY(0) scale(1); 
-            }
+            from { opacity: 0; transform: translateY(16px); }
+            to { opacity: 1; transform: translateY(0); }
         }
 
-        .box h2 {
-            background: linear-gradient(135deg, var(--text-color), var(--accent-color));
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-            margin: 0 0 32px;
-            font-size: 24px;
-            font-weight: 600;
+        h1 {
+            margin: 0 0 24px;
+            font-size: 1.65rem;
+            line-height: 1.3;
             letter-spacing: -0.5px;
         }
 
+        h2 { margin: 0 0 12px; font-size: 1.1rem; }
+        p { margin: 0 0 16px; }
+        a { color: var(--link-color); text-underline-offset: 3px; }
+
+        :focus-visible {
+            outline: 3px solid var(--focus-color);
+            outline-offset: 4px;
+        }
+
         .error-msg {
-            color: #FF6B6B;
-            background: rgba(255, 107, 107, 0.1);
-            padding: 12px;
-            border-radius: 8px;
-            margin-bottom: 16px;
-            border: 1px solid rgba(255, 107, 107, 0.2);
-            font-weight: 500;
-        }
-
-        input[type="text"] {
-            width: 100%;
+            color: var(--error-color);
+            background: #FFF0F0;
             padding: 16px;
-            font-size: 16px;
-            border-radius: 16px;
-            border: 1px solid rgba(255, 255, 255, 0.2);
-            background: rgba(255, 255, 255, 0.1);
-            backdrop-filter: blur(20px);
-            -webkit-backdrop-filter: blur(20px);
-            box-sizing: border-box;
-            transition: all 0.3s ease;
-            color: var(--text-color);
-            margin-bottom: 16px;
-        }
-        input[type="text"]:focus {
-            outline: none;
-            border-color: var(--accent-color);
-            box-shadow: 
-                0 0 0 3px var(--accent-glow),
-                0 4px 16px var(--shadow-deep);
-        }
-        input[type="text"]::placeholder {
-            color: var(--text-muted);
-        }
-
-        button[type="submit"], #copyBtn {
-            width: 100%;
-            padding: 16px;
-            font-size: 16px;
-            font-weight: 600;
-            border-radius: 16px;
-            border: none;
-            cursor: pointer;
-            background: linear-gradient(135deg, var(--accent-color), #8AB4F8);
-            color: var(--text-color);
-            transition: all 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94);
-            box-shadow: 
-                0 4px 16px var(--shadow-soft),
-                inset 0 1px 0 rgba(255, 255, 255, 0.2);
-        }
-        button[type="submit"]:hover, #copyBtn:hover {
-            transform: translateY(-3px) scale(1.02);
-            box-shadow: 
-                0 8px 24px var(--accent-glow),
-                inset 0 1px 0 rgba(255, 255, 255, 0.3);
-        }
-        button[type="submit"]:active, #copyBtn:active {
-            transform: translateY(-1px) scale(1);
-        }
-
-        .content-display {
-            margin: 20px 0;
-            background: rgba(255, 255, 255, 0.1);
-            border-radius: 16px;
-            padding: 20px;
-            box-shadow: 0 4px 16px var(--shadow-soft);
+            border: 1px solid var(--error-color);
+            border-radius: 12px;
+            margin-bottom: 24px;
             text-align: left;
         }
 
-        .content-display h3 {
-            font-size: 18px;
-            margin-bottom: 16px;
-            color: var(--text-color);
-            text-align: center;
-        }
+        form { text-align: left; }
+        label { display: block; margin-bottom: 8px; font-weight: 600; }
+        .help, .privacy { color: var(--text-muted); font-size: 0.95rem; }
 
-        #textContent {
-            background: rgba(0, 0, 0, 0.03);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 8px;
-            padding: 16px;
-            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
-            font-size: 14px;
-            line-height: 1.4;
-            white-space: pre-wrap;
-            word-wrap: break-word;
-            max-height: 500px;
-            overflow-y: auto;
-            color: var(--text-color);
-            margin-bottom: 16px;
-        }
-
-        .msg {
-            margin-top: 24px;
-            font-size: 15px;
-        }
-        .msg a {
-            color: var(--text-muted);
-            text-decoration: none;
-            transition: all 0.3s ease;
-            font-weight: 500;
-            padding: 8px 0;
-            display: block;
-            border-radius: 8px;
-        }
-        .msg a:hover {
-            color: var(--text-color);
-            background: rgba(255, 255, 255, 0.1);
-            transform: translateY(-1px);
-        }
-
-        /* Enhanced About Section Styles */
-        .about-section {
-            margin-top: 40px;
-            padding: 24px;
-            background: rgba(255, 255, 255, 0.1);
-            backdrop-filter: blur(20px);
-            -webkit-backdrop-filter: blur(20px);
-            border-radius: 16px;
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            box-shadow: 0 4px 16px var(--shadow-soft);
-            position: relative;
-            overflow: hidden;
-        }
-
-        .about-section::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
+        input[type="text"] {
             width: 100%;
-            height: 4px;
-            background: linear-gradient(90deg, var(--accent-color), #8AB4F8);
-        }
-
-        .about-header {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 12px;
-            margin-bottom: 20px;
-        }
-
-        .about-icon {
-            width: 40px;
-            height: 40px;
-            border-radius: 50%;
-            background: linear-gradient(135deg, var(--accent-color), #8AB4F8);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            box-shadow: 0 4px 12px var(--accent-glow);
-        }
-
-        .about-icon svg {
-            width: 20px;
-            height: 20px;
-            fill: white;
-        }
-
-        .about-section h3 {
-            font-size: 20px;
-            font-weight: 600;
+            min-height: 48px;
+            padding: 12px 16px;
+            border: 1px solid #677589;
+            border-radius: 16px;
+            background: #FFF;
             color: var(--text-color);
-            text-align: center;
-            margin-bottom: 16px;
-        }
-
-        .about-section p {
-            font-size: 14px;
-            line-height: 1.6;
-            color: var(--text-color);
-            margin-bottom: 20px;
-            text-align: center;
-        }
-
-        .features-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-            gap: 16px;
-        }
-
-        .feature-card {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            padding: 12px;
-            background: rgba(255, 255, 255, 0.05);
-            border-radius: 12px;
-            transition: all 0.3s ease;
-        }
-
-        .feature-card:hover {
-            background: rgba(255, 255, 255, 0.1);
-            transform: translateY(-2px);
-        }
-
-        .feature-icon {
-            width: 32px;
-            height: 32px;
+            font: inherit;
+            font-size: 1.125rem;
             margin-bottom: 8px;
         }
 
-        .feature-icon svg {
-            width: 100%;
-            height: 100%;
-            fill: var(--accent-color);
-        }
-
-        .feature-card h4 {
-            font-size: 13px;
-            font-weight: 600;
-            margin-bottom: 6px;
-            color: var(--text-color);
-        }
-
-        .feature-card p {
-            font-size: 11px;
-            line-height: 1.4;
-            color: var(--text-muted);
-            margin: 0;
-        }
-
-        .tech-stack {
-            display: flex;
-            justify-content: center;
-            gap: 12px;
-            margin-bottom: 20px;
-            flex-wrap: wrap;
-        }
-
-        .tech-badge {
-            background: rgba(255, 255, 255, 0.1);
-            backdrop-filter: blur(10px);
-            border-radius: 20px;
-            padding: 6px 12px;
-            font-size: 12px;
-            font-weight: 500;
-            color: var(--text-color);
-            border: 1px solid rgba(255, 255, 255, 0.2);
-        }
-
-        .connect-section {
-            text-align: center;
-            margin-top: 24px;
-            padding-top: 20px;
-            border-top: 1px solid rgba(255, 255, 255, 0.1);
-        }
-
-        .connect-section h4 {
-            font-size: 16px;
-            font-weight: 600;
-            margin-bottom: 16px;
-            color: var(--text-muted);
-        }
-
-        .social-links {
-            display: flex;
-            justify-content: center;
-            gap: 16px;
-            flex-wrap: wrap;
-        }
-
-        .social-link {
+        .button {
             display: flex;
             align-items: center;
-            gap: 8px;
-            color: var(--accent-color);
-            text-decoration: none;
-            font-weight: 500;
-            padding: 8px 16px;
-            border-radius: 8px;
-            background: rgba(255, 255, 255, 0.05);
-            transition: all 0.2s ease;
-        }
-
-        .social-link:hover {
-            color: var(--text-color);
-            background: rgba(255, 255, 255, 0.1);
-            transform: translateY(-2px);
-            box-shadow: 0 4px 12px var(--shadow-soft);
-        }
-
-        .social-icon {
-            width: 16px;
-            height: 16px;
-        }
-
-        .social-icon svg {
+            justify-content: center;
             width: 100%;
-            height: 100%;
-            fill: currentColor;
+            min-height: 48px;
+            padding: 12px 16px;
+            border: 1px solid #677589;
+            border-radius: 16px;
+            background: linear-gradient(135deg, var(--accent-color), #8AB4F8);
+            color: var(--text-color);
+            font: inherit;
+            font-weight: 600;
+            text-align: center;
+            text-decoration: none;
+            cursor: pointer;
+            transition: box-shadow 0.2s ease;
         }
+
+        .button:hover { box-shadow: 0 4px 16px rgba(35, 77, 123, 0.25); }
+        .button.secondary { background: #E8EFF8; }
+        .button[hidden] { display: none; }
+
+        .metadata {
+            margin: 0 0 24px;
+            padding: 16px;
+            border-radius: 16px;
+            background: rgba(255, 255, 255, 0.6);
+            text-align: left;
+        }
+
+        dt { font-weight: 600; }
+        dd { margin: 0 0 12px; }
+        dd:last-child { margin-bottom: 0; }
+        .key { font-family: monospace; font-size: 1.25rem; letter-spacing: 0.15em; }
+
+        #textContent {
+            margin: 0 0 16px;
+            padding: 16px;
+            border: 1px solid #677589;
+            border-radius: 12px;
+            background: #FFF;
+            color: var(--text-color);
+            font-family: "Monaco", "Menlo", monospace;
+            font-size: 0.95rem;
+            line-height: 1.6;
+            text-align: left;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            max-height: 60vh;
+            overflow: auto;
+            tab-size: 4;
+        }
+
+        .share-link { margin-top: 24px; text-align: left; }
+        #detailsUrl { display: block; min-height: 44px; padding: 8px 0; }
+        #copyStatus { min-height: 1.6em; margin: 12px 0 0; color: var(--text-muted); }
+        summary { cursor: pointer; min-height: 44px; padding: 8px 0; }
+        .qr-code { display: block; width: 220px; max-width: 100%; height: auto; margin: 12px auto; background: white; }
+
+        nav { display: flex; flex-wrap: wrap; gap: 8px 16px; justify-content: center; margin-top: 24px; }
+        nav a { display: inline-flex; align-items: center; min-height: 44px; padding: 8px; }
+
+        .about-section {
+            margin-top: 24px;
+            padding-top: 24px;
+            border-top: 2px solid var(--accent-color);
+        }
+
+        .about-section p:last-child { margin-bottom: 0; }
 
         @media (max-width: 480px) {
-            .box { padding: 32px 24px; }
-            h2 { font-size: 20px; }
-            .about-section { padding: 20px; }
-            .features-grid { grid-template-columns: 1fr; }
+            body { padding: 16px 12px; }
+            .box { padding: 24px 20px; }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after { animation: none !important; transition: none !important; }
         }
     </style>
 </head>
 <body>
-    <div class="box">
-        {% if not is_text %}
-            <h2>Download by Key</h2>
-            {% if error %}
-                <div class="error-msg">{{ error }}</div>
+    <main class="box">
+        {% if not share|default(none) %}
+            <h1>Download by Key</h1>
+            {% if error|default(none) %}
+                <div id="downloadError" class="error-msg" role="alert">{{ error }}</div>
             {% endif %}
-            <form method="POST">
-                <input type="text" name="key" placeholder="Enter 4-digit key" required />
-                <button type="submit">Download</button>
+            <form method="POST" action="{{ url_for('download_page') }}">
+                <label for="key">Five-digit share key</label>
+                <input id="key" name="key" type="text" inputmode="numeric" pattern="[0-9]{5}"
+                       maxlength="5" minlength="5" required autocomplete="off"
+                       value="{{ key|default('', true) }}"
+                       aria-describedby="keyHelp{% if error|default(none) %} downloadError{% endif %}"
+                       {% if error|default(none) and key|default(none) %}aria-invalid="true"{% endif %}>
+                <p id="keyHelp" class="help">Enter exactly five digits (0-9), including any leading zeros, to open the share details.</p>
+                <button class="button" type="submit">Open Share</button>
             </form>
-            <div class="msg">
-                <a href="/">Back to Share</a>
-            </div>
         {% else %}
-            <h2>{{ name }}</h2>
-            <div class="content-display">
-                <pre id="textContent">{{ content }}</pre>
-                <button id="copyBtn" onclick="copyText()">Copy All Text</button>
-            </div>
-            <div class="msg">
-                <a href="/download">New Download</a> | <a href="/">Back to Share</a>
-            </div>
+            <h1>{{ share.name }}</h1>
+            <dl class="metadata">
+                <dt>Five-digit share key</dt>
+                <dd class="key">{{ share.key }}</dd>
+                <dt>Expires</dt>
+                <dd><time id="expiresAt" datetime="{{ share.expires }}" title="{{ share.expires }} (UTC)">{{ share.expires }} (UTC)</time></dd>
+                {% if share.type == 'file' %}
+                    <dt>File size</dt>
+                    <dd>{{ share.size|filesizeformat }} ({{ share.size }} bytes)</dd>
+                {% endif %}
+            </dl>
+
+            {% if share.type == 'file' %}
+                <a class="button" href="{{ share.link }}">Download</a>
+            {% elif share.type == 'text' %}
+                <h2 id="textHeading">Shared text</h2>
+                {# HTML strips the first newline in a pre; keep leading newlines in the shared text. #}
+                <pre id="textContent" tabindex="0" role="region" aria-labelledby="textHeading">
+{{ share.content }}</pre>
+                <button class="button" id="copyText" type="button" data-copy-target="textContent" hidden>Copy All Text</button>
+            {% endif %}
+
+            <section class="share-link" aria-labelledby="linkHeading">
+                <h2 id="linkHeading">Share details URL</h2>
+                <a id="detailsUrl" href="{{ share.page_url }}">{{ share.page_url }}</a>
+                <p class="help">You can select and copy this URL manually.</p>
+                <button class="button secondary" type="button" data-copy-target="detailsUrl" hidden>Copy Link</button>
+            </section>
+            <p id="copyStatus" role="status" aria-live="polite" aria-atomic="true"></p>
+            <details>
+                <summary>Show QR Code</summary>
+                <img class="qr-code" src="{{ url_for('share_qr', key=share.key) }}" loading="lazy"
+                     width="220" height="220" alt="QR code for this share's details URL">
+                <p class="help">Scan with your phone's camera. Generated here, not by an external QR service.</p>
+            </details>
+            <noscript><p class="help">Copy the URL or shared text manually. The expiry time above is in UTC.</p></noscript>
         {% endif %}
 
-        <div class="about-section">
-            <div class="about-header">
-                <div class="about-icon">
-                    <svg viewBox="0 0 24 24">
-                        <path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/>
-                    </svg>
-                </div>
-                <h3>About AlienXFile V2</h3>
-            </div>
-            
-            <p>AlienXFile V2 is a secure, fast, and temporary file/text sharing platform built with Python and Flask, using litterbox.catbox.moe for reliable temporary file handling with customizable expiration.</p>
-            
-            <div class="features-grid">
-                <div class="feature-card">
-                    <div class="feature-icon">
-                        <svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
-                    </div>
-                    <h4>Easy Upload</h4>
-                    <p>Up to 1GB</p>
-                </div>
-                <div class="feature-card">
-                    <div class="feature-icon">
-                        <svg viewBox="0 0 24 24"><path d="M15.67 4H14V2h-4v2H8.33C7.6 4 7 4.6 7 5.33v15.33C7 21.4 7.6 22 8.33 22h7.33c.74 0 1.34-.6 1.34-1.33V5.33C17 4.6 16.4 4 15.67 4z"/></svg>
-                    </div>
-                    <h4>Secure Access</h4>
-                    <p>4-digit keys</p>
-                </div>
-                <div class="feature-card">
-                    <div class="feature-icon">
-                        <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
-                    </div>
-                    <h4>Temporary</h4>
-                    <p>Custom expiration</p>
-                </div>
-                <div class="feature-card">
-                    <div class="feature-icon">
-                        <svg viewBox="0 0 24 24"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>
-                    </div>
-                    <h4>Modern UI</h4>
-                    <p>Clean & Responsive</p>
-                </div>
-            </div>
-            
-            <div class="connect-section">
-                <h4>Connect with the Developer</h4>
-                <div class="social-links">
-                    <a href="https://github.com/aryankahar31" target="_blank" class="social-link">
-                        <span class="social-icon"><svg viewBox="0 0 24 24"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg></span>
-                        GitHub
-                    </a>
-                    <a href="https://instagram.com/aryankahar31" target="_blank" class="social-link">
-                        <span class="social-icon"><svg viewBox="0 0 24 24"><path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zm0-2.163c-3.259 0-3.667.014-4.947.072-4.358.2-6.78 2.618-6.98 6.98-.059 1.281-.073 1.689-.073 4.948 0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98 1.281.058 1.689.072 4.948.072 3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98-1.281-.059-1.69-.073-4.949-.073zm0 5.838c-3.403 0-6.162 2.759-6.162 6.162s2.759 6.163 6.162 6.163 6.162-2.759 6.162-6.163c0-3.403-2.759-6.162-6.162-6.162zm0 10.162c-2.209 0-4-1.79-4-4 0-2.209 1.791-4 4-4s4 1.791 4 4c0 2.21-1.791 4-4 4zm6.406-11.845c-.796 0-1.441.645-1.441 1.44s.645 1.44 1.441 1.44c.795 0 1.439-.645 1.439-1.44s-.644-1.44-1.439-1.44z"/></svg></span>
-                        Instagram
-                    </a>
-                    <a href="https://x.com/aryankahar31" target="_blank" class="social-link">
-                        <span class="social-icon">
-                            <svg viewBox="0 0 24 24">
-                                <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
-                            </svg>
-                        </span>
-                        X (Twitter)
-                    </a>
-                    <a href="mailto:aryankahar3000@gmail.com" class="social-link">
-                        <span class="social-icon">
-                            <svg viewBox="0 0 24 24">
-                                <path d="M20 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/>
-                            </svg>
-                        </span>
-                        Email
-                    </a>
-                </div>
-            </div>
-        </div>
-    </div>
+        <nav aria-label="Share navigation">
+            <a href="/">Back to Upload</a>
+            <a href="{{ url_for('download_page') }}">New Download</a>
+        </nav>
 
-    {% if is_text %}
+        <section class="about-section" aria-labelledby="aboutHeading">
+            <h2 id="aboutHeading">About AlienXFile V2</h2>
+            <p class="help">Temporary file and text sharing. Files up to <span title="{{ upload_max_bytes }} bytes">{{ upload_limit_label }}</span>; text up to {{ max_text_length }} characters.</p>
+            <p class="privacy">Keep the code and link private: anyone with either can access the share until it expires. A five-digit code is not encryption. Do not share passwords, credentials, or other sensitive information.</p>
+        </section>
+    </main>
+
+    {% if share|default(none) %}
     <script>
-    function copyText() {
-        const content = document.getElementById('textContent').textContent;
-        navigator.clipboard.writeText(content).then(() => {
-            const btn = document.getElementById('copyBtn');
-            const orig = btn.textContent;
-            btn.textContent = 'Copied!';
-            setTimeout(() => { btn.textContent = orig; }, 2000);
-        }).catch(err => {
-            console.error('Copy failed', err);
-            alert('Copy failed. Please try manually selecting and copying the text.');
+        const time = document.getElementById('expiresAt');
+        const expires = new Date(time.dateTime);
+        if (!Number.isNaN(expires.getTime())) {
+            time.textContent = expires.toLocaleString(undefined, {
+                year: 'numeric', month: 'long', day: 'numeric',
+                hour: 'numeric', minute: '2-digit', second: '2-digit', timeZoneName: 'short'
+            });
+        }
+
+        const status = document.getElementById('copyStatus');
+        document.querySelectorAll('[data-copy-target]').forEach((button) => {
+            button.hidden = false;
+            button.addEventListener('click', async () => {
+                const isText = button.dataset.copyTarget === 'textContent';
+                const content = document.getElementById(button.dataset.copyTarget).textContent;
+                status.textContent = '';
+                try {
+                    await navigator.clipboard.writeText(content);
+                    status.textContent = isText ? 'All text copied.' : 'Share details link copied.';
+                } catch {
+                    status.textContent = isText
+                        ? 'Copy unavailable. Select the shared text above and copy it manually.'
+                        : 'Copy unavailable. Select the details URL above and copy it manually.';
+                }
+            });
         });
-    }
     </script>
     {% endif %}
 </body>

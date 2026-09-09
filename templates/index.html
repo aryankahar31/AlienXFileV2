@@ -4,9 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AlienX Instant Share</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=SF+Pro+Display:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="{{ url_for('static', filename='upload.js') }}" defer></script>
     <style>
         :root {
             --accent-color: #A7C7E7; /* Soft pastel blue for neutrality */
@@ -18,9 +16,11 @@
             --shadow-soft: rgba(0, 0, 0, 0.05);
             --shadow-deep: rgba(0, 0, 0, 0.1);
             --text-color: #1D1D1F;
-            --text-muted: #6E6E73;
-            --success-color: #4CAF50;
-            --warning-color: #FF9800;
+            --text-muted: #454952;
+            --success-color: #246135;
+            --warning-color: #754300;
+            --error-color: #9B2525;
+            --link-color: #204F85;
         }
 
         * {
@@ -30,7 +30,8 @@
         }
 
         body {
-            font-family: 'SF Pro Display', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            line-height: 1.5;
             background: linear-gradient(135deg, var(--bg-start), var(--bg-end));
             color: var(--text-color);
             display: grid;
@@ -63,7 +64,7 @@
             width: 100%;
             max-width: 500px;
             padding: 40px;
-            box-shadow: 
+            box-shadow:
                 0 8px 32px var(--shadow-soft),
                 0 2px 16px var(--shadow-deep),
                 inset 0 1px 0 rgba(255, 255, 255, 0.2);
@@ -84,26 +85,22 @@
         }
 
         @keyframes floatIn {
-            from { 
-                opacity: 0; 
-                transform: translateY(30px) scale(0.95); 
+            from {
+                opacity: 0;
+                transform: translateY(30px) scale(0.95);
             }
-            to { 
-                opacity: 1; 
-                transform: translateY(0) scale(1); 
+            to {
+                opacity: 1;
+                transform: translateY(0) scale(1);
             }
         }
 
-        .card h2 {
+        .card h1 {
             text-align: center;
             font-weight: 600;
             margin-bottom: 32px;
             font-size: 28px;
             letter-spacing: -0.5px;
-            background: linear-gradient(135deg, var(--text-color), var(--accent-color));
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
         }
 
         /* Segmented Control for Mode Switch */
@@ -118,8 +115,19 @@
             box-shadow: 0 2px 8px var(--shadow-soft);
             overflow: hidden;
         }
-        .mode-switch input[type="radio"] {
-            display: none;
+        .mode-switch input[type="radio"], .visually-hidden {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            padding: 0;
+            border: 0;
+            overflow: hidden;
+            clip-path: inset(50%);
+            white-space: nowrap;
+        }
+        .mode-switch input:focus-visible + label {
+            outline: 3px solid var(--link-color);
+            outline-offset: -3px;
         }
         .mode-switch label {
             flex: 1;
@@ -136,7 +144,7 @@
             background: rgba(255, 255, 255, 0.8);
             color: var(--text-color);
             font-weight: 600;
-            box-shadow: 
+            box-shadow:
                 inset 0 -2px 0 rgba(0, 0, 0, 0.05),
                 0 2px 8px var(--shadow-soft);
             transform: translateY(-1px);
@@ -159,14 +167,13 @@
             font-weight: 500;
             color: var(--text-muted);
             font-size: 14px;
-            white-space: nowrap;
         }
         .expire-section select {
             flex: 1;
             background: rgba(255, 255, 255, 0.2);
             backdrop-filter: blur(20px);
             -webkit-backdrop-filter: blur(20px);
-            border: 1px solid rgba(255, 255, 255, 0.3);
+            border: 1px solid #74849A;
             color: var(--text-color);
             border-radius: 8px;
             padding: 8px 12px;
@@ -175,19 +182,17 @@
             cursor: pointer;
             transition: all 0.3s ease;
         }
-        .expire-section select:focus {
-            outline: none;
-            border-color: var(--accent-color);
-            box-shadow: 0 0 0 3px var(--accent-glow);
-        }
         .expire-section select option {
             background: var(--text-color);
             color: white;
         }
+        .expire-section small {
+            color: var(--text-muted);
+            font-size: 12px;
+        }
 
         /* Inputs */
-        #fileInputContainer, #textInput {
-            display: none; /* JS will handle this */
+        #fileInputContainer, #textInputContainer {
             width: 100%;
             margin-bottom: 24px;
         }
@@ -196,7 +201,7 @@
             background: rgba(255, 255, 255, 0.05);
             backdrop-filter: blur(20px);
             -webkit-backdrop-filter: blur(20px);
-            border: 2px dashed rgba(255, 255, 255, 0.2);
+            border: 2px dashed #74849A;
             border-radius: 16px;
             padding: 40px 20px;
             text-align: center;
@@ -208,7 +213,7 @@
             justify-content: center;
             box-shadow: 0 4px 16px var(--shadow-soft);
         }
-        #fileInputLabel:hover {
+        #fileInputLabel:hover, #fileInputLabel.dragover {
             background: rgba(255, 255, 255, 0.1);
             border-color: var(--accent-color);
             transform: translateY(-2px);
@@ -224,14 +229,26 @@
         }
 
         #fileInput {
-            display: none;
+            width: 100%;
+            margin-top: 12px;
+            min-height: 44px;
+            font: inherit;
+        }
+        #fileInput::file-selector-button {
+            min-height: 44px;
+            padding: 8px 12px;
+            border: 1px solid #74849A;
+            border-radius: 8px;
+            background: #E7EFF9;
+            color: var(--text-color);
+            cursor: pointer;
         }
 
         #textInput {
             background: rgba(255, 255, 255, 0.1);
             backdrop-filter: blur(20px);
             -webkit-backdrop-filter: blur(20px);
-            border: 1px solid rgba(255, 255, 255, 0.2);
+            border: 1px solid #74849A;
             color: var(--text-color);
             border-radius: 16px;
             padding: 16px;
@@ -241,13 +258,6 @@
             width: 100%;
             transition: all 0.3s ease;
             box-shadow: 0 2px 8px var(--shadow-soft);
-        }
-        #textInput:focus {
-            outline: none;
-            border-color: var(--accent-color);
-            box-shadow: 
-                0 0 0 3px var(--accent-glow),
-                0 4px 16px var(--shadow-deep);
         }
         #textInput::placeholder {
             color: var(--text-muted);
@@ -265,7 +275,7 @@
             background: linear-gradient(135deg, var(--accent-color), #8AB4F8);
             color: var(--text-color);
             transition: all 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94);
-            box-shadow: 
+            box-shadow:
                 0 4px 16px var(--shadow-soft),
                 inset 0 1px 0 rgba(255, 255, 255, 0.2);
             position: relative;
@@ -286,7 +296,7 @@
         }
         button[type="submit"]:hover {
             transform: translateY(-3px) scale(1.02);
-            box-shadow: 
+            box-shadow:
                 0 8px 24px var(--accent-glow),
                 inset 0 1px 0 rgba(255, 255, 255, 0.3);
         }
@@ -307,6 +317,18 @@
             transition: all 0.4s ease;
             box-shadow: 0 4px 16px var(--shadow-soft);
             border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        #result.success {
+            border-color: var(--success-color);
+            background: rgba(76, 175, 80, 0.1);
+        }
+        #result.error {
+            border-color: var(--error-color);
+            background: rgba(255, 107, 107, 0.1);
+        }
+        #result.warning {
+            border-color: var(--warning-color);
+            background: rgba(255, 152, 0, 0.1);
         }
 
         .upload-item {
@@ -331,22 +353,21 @@
         .upload-item b {
             display: block;
             margin-bottom: 12px;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
+            overflow-wrap: anywhere;
             font-weight: 600;
         }
         .upload-item .key-line {
             display: flex;
+            flex-wrap: wrap;
             align-items: center;
             gap: 12px;
             margin-bottom: 12px;
             font-size: 14px;
         }
-        .key-line .copy-btn {
+        .copy-btn, #cancelUpload {
             background: rgba(255, 255, 255, 0.2);
             backdrop-filter: blur(10px);
-            border: 1px solid rgba(255, 255, 255, 0.3);
+            border: 1px solid #74849A;
             color: var(--text-color);
             padding: 6px 12px;
             border-radius: 8px;
@@ -355,13 +376,13 @@
             font-weight: 500;
             transition: all 0.2s ease;
         }
-        .key-line .copy-btn:hover {
+        .copy-btn:hover, #cancelUpload:hover {
             background: rgba(255, 255, 255, 0.3);
             transform: scale(1.05);
         }
         .upload-item a {
-            color: var(--accent-color);
-            text-decoration: none;
+            color: var(--link-color);
+            text-decoration: underline;
             font-weight: 500;
             transition: all 0.2s ease;
             margin-right: 12px;
@@ -369,6 +390,17 @@
         .upload-item a:hover {
             color: var(--text-color);
             text-shadow: 0 1px 2px var(--shadow-soft);
+        }
+
+        .warning-item {
+            background: rgba(255, 152, 0, 0.1);
+            border-left-color: var(--warning-color);
+            color: var(--warning-color);
+            font-weight: 500;
+        }
+        .error-item {
+            color: var(--error-color);
+            border-left-color: var(--error-color);
         }
 
         hr {
@@ -568,7 +600,7 @@
             display: flex;
             align-items: center;
             gap: 8px;
-            color: var(--accent-color);
+            color: var(--link-color);
             text-decoration: none;
             font-weight: 500;
             padding: 8px 16px;
@@ -595,12 +627,39 @@
             fill: currentColor;
         }
 
+        [hidden] { display: none !important; }
+        fieldset { border: 0; min-width: 0; }
+        button, select, a { min-height: 44px; }
+        button, input, select, textarea { font: inherit; }
+        button { touch-action: manipulation; }
+        button:disabled, fieldset:disabled label { cursor: not-allowed; }
+        button:disabled { opacity: 0.65; }
+        :focus-visible { outline: 3px solid var(--link-color); outline-offset: 3px; }
+        .card, .upload-item, #fileInputLabel, #uploadStatus { overflow-wrap: anywhere; min-width: 0; }
+        #fileInputLabel span { max-width: 100%; }
+        .copy-fallback { width: 100%; min-height: 44px; }
+        .notice { color: var(--text-muted); font-size: 14px; margin: 12px 0; }
+        #selectedFiles { padding-left: 20px; margin-top: 12px; }
+        #selectedFiles:empty { display: none; }
+        #uploadStatus { margin-top: 16px; }
+        #uploadProgress { width: 100%; accent-color: var(--link-color); }
+        #cancelUpload { margin-top: 12px; }
+        .result-links { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+        .result-links a { display: inline-flex; align-items: center; }
+        .upload-item p, #result h3 { margin-bottom: 12px; }
+
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after { animation: none !important; transition: none !important; }
+            .card * { transform: none !important; }
+        }
+
         /* Mobile Responsiveness */
         @media (max-width: 480px) {
-            .card { padding: 32px 24px; }
             .mode-switch { flex-direction: column; }
             .expire-section { flex-direction: column; align-items: stretch; }
-            h2 { font-size: 24px; }
+            .card h1 { font-size: 24px; }
+            .card { padding: 24px 16px; }
+            #result, .upload-item { padding: 12px; }
             .about-section { padding: 20px; }
             .features-grid { grid-template-columns: 1fr; }
             .social-links { flex-direction: column; }
@@ -609,18 +668,24 @@
     </style>
 </head>
 <body>
-    
-    <div class="card">
-        <h2>AlienX Instant Share</h2>
-        <form id="uploadForm" enctype="multipart/form-data">
-            
-            <div class="mode-switch">
+
+    <main class="card">
+        <h1>AlienX Instant Share</h1>
+        <noscript><p class="notice">JavaScript is required for uploads, progress, and share results. Enable it and reload this page. The download page still works without JavaScript.</p></noscript>
+        <form id="uploadForm" action="/upload" method="post" enctype="multipart/form-data"
+              data-max-bytes="{{ upload_max_bytes }}" data-limit-label="{{ upload_limit_label }}"
+              data-max-text-length="{{ max_text_length }}">
+            <fieldset id="uploadControls" disabled>
+            <legend class="visually-hidden">Share files or text</legend>
+
+            <fieldset class="mode-switch">
+                <legend class="visually-hidden">Share mode</legend>
                 <input type="radio" id="modeFile" name="mode" value="file" checked>
                 <label for="modeFile">File Upload</label>
-                
+
                 <input type="radio" id="modeText" name="mode" value="text">
                 <label for="modeText">Text Share</label>
-            </div>
+            </fieldset>
 
             <div class="expire-section">
                 <label for="expire">Expire after:</label>
@@ -635,17 +700,31 @@
             <div id="fileInputContainer">
                 <label for="fileInput" id="fileInputLabel">
                     <span id="fileInputText">Choose files or drag here</span>
-                    <small>Max 1GB per file</small>
+                    <small>Choose multiple files; each uploads separately.</small>
                 </label>
-                <input type="file" name="file" id="fileInput" multiple />
+                <input type="file" name="file" id="fileInput" multiple required aria-describedby="fileLimits" />
+                <p class="notice" id="fileLimits">Current limit: {{ upload_limit_label }} per file ({{ upload_max_bytes }} bytes).
+                    The app ceiling is 1 GB (1,000,000,000 bytes); deployment settings or hosting may cap uploads lower.</p>
+                <p class="notice">Blocked extensions: {{ banned_exts | join(', ') }}.</p>
+                <ul id="selectedFiles" aria-label="Selected files"></ul>
             </div>
 
-            <textarea name="text" id="textInput" placeholder="Enter text to share..."></textarea>
-            
+            <div id="textInputContainer" hidden>
+                <label for="textInput">Text to share</label>
+                <textarea name="text" id="textInput" placeholder="Enter text to share..." disabled aria-describedby="textLimit"></textarea>
+                <p class="notice" id="textLimit">Maximum {{ max_text_length }} characters.</p>
+            </div>
+
             <button type="submit">Share Now</button>
+            </fieldset>
+            <button type="button" id="cancelUpload" hidden>Cancel Uploads</button>
+            <p id="cancelNotice" class="notice" hidden>Cancel stops this browser's request and remaining queue. The server might already finish storing the current item; cancellation does not delete it.</p>
         </form>
 
-        <div id="result">Ready to receive your files...</div>
+        <p id="uploadStatus" role="status" aria-live="polite" aria-atomic="true">Ready to share.</p>
+        <progress id="uploadProgress" max="100" value="0" aria-label="Current item: browser to app upload" hidden></progress>
+        <p class="notice">Temporary sharing, not a backup. Anyone with a five-digit code or link can access the content. Codes are not passwords or encryption. Avoid sensitive content; files are sent to a third-party storage provider. Expiration cannot recall downloaded copies, and availability may end earlier.</p>
+        <section id="result" aria-label="Upload results" hidden></section>
 
         <hr>
         <a href="/download" class="download-link">Go to Download Page</a>
@@ -659,9 +738,9 @@
                 </div>
                 <h3>About AlienXFile V2</h3>
             </div>
-            
-            <p>AlienXFile V2 is a secure, fast, and temporary file/text sharing platform built with Python and Flask, using litterbox.catbox.moe for reliable temporary file handling with customizable expiration (1h to 3 days).</p>
-            
+
+            <p>AlienXFile V2 is a temporary file/text sharing platform built with Python and Flask, using litterbox.catbox.moe for temporary file storage with expiration options from 1 hour to 3 days.</p>
+
             <div class="features-grid">
                 <div class="feature-card">
                     <div class="feature-icon">
@@ -670,7 +749,7 @@
                         </svg>
                     </div>
                     <h4>Easy Upload</h4>
-                    <p>Upload files up to 1GB or share text with a simple interface</p>
+                    <p>Upload files up to {{ upload_limit_label }} each or share text. Hosting limits may be lower.</p>
                 </div>
                 <div class="feature-card">
                     <div class="feature-icon">
@@ -678,8 +757,8 @@
                             <path d="M15.67 4H14V2h-4v2H8.33C7.6 4 7 4.6 7 5.33v15.33C7 21.4 7.6 22 8.33 22h7.33c.74 0 1.34-.6 1.34-1.33V5.33C17 4.6 16.4 4 15.67 4z"/>
                         </svg>
                     </div>
-                    <h4>Secure Access</h4>
-                    <p>Automatic 4-digit key generation for secure content access</p>
+                    <h4>Five-Digit Codes</h4>
+                    <p>Share a code or link for easy access, not private or encrypted access.</p>
                 </div>
                 <div class="feature-card">
                     <div class="feature-icon">
@@ -688,7 +767,7 @@
                         </svg>
                     </div>
                     <h4>Temporary Storage</h4>
-                    <p>Custom expiration options ensure your privacy and security</p>
+                    <p>Choose an expiry and keep your own backup. Downloaded copies may remain.</p>
                 </div>
                 <div class="feature-card">
                     <div class="feature-icon">
@@ -700,7 +779,7 @@
                     <p>Responsive design with smooth animations for great user experience</p>
                 </div>
             </div>
-            
+
             <div class="tech-stack">
                 <span class="tech-badge">Python</span>
                 <span class="tech-badge">Flask</span>
@@ -709,7 +788,7 @@
                 <span class="tech-badge">CSS3</span>
                 <span class="tech-badge">JavaScript</span>
             </div>
-            
+
             <div class="connect-section">
                 <h4>Connect with the Developer</h4>
                 <div class="social-links">
@@ -748,102 +827,8 @@
                 </div>
             </div>
         </div>
-    </div>
+    </main>
 
-<script>
-const form = document.getElementById('uploadForm');
-const result = document.getElementById('result');
-const fileInputContainer = document.getElementById('fileInputContainer');
-const fileInput = document.getElementById('fileInput');
-const fileInputText = document.getElementById('fileInputText');
-const textInput = document.getElementById('textInput');
-const radios = form.querySelectorAll('input[name="mode"]');
-
-function switchMode(mode) {
-    if (mode === 'file') {
-        fileInputContainer.style.display = 'block';
-        textInput.style.display = 'none';
-        fileInput.setAttribute('required', true);
-        textInput.removeAttribute('required');
-    } else {
-        fileInputContainer.style.display = 'none';
-        textInput.style.display = 'block';
-        fileInput.removeAttribute('required');
-        textInput.setAttribute('required', true);
-    }
-}
-
-radios.forEach(radio => {
-    radio.addEventListener('change', (e) => switchMode(e.target.value));
-});
-
-// Initial state based on checked radio
-switchMode(form.querySelector('input[name="mode"]:checked').value);
-
-// Update file input label with selected file names
-fileInput.addEventListener('change', () => {
-    if (fileInput.files.length > 0) {
-        if (fileInput.files.length === 1) {
-            fileInputText.textContent = fileInput.files[0].name;
-        } else {
-            fileInputText.textContent = `${fileInput.files.length} files selected`;
-        }
-    } else {
-        fileInputText.textContent = 'Choose files or drag here';
-    }
-});
-
-// Copy to clipboard function
-function copyToClipboard(text, button) {
-    navigator.clipboard.writeText(text).then(() => {
-        const original = button.textContent;
-        button.textContent = 'Copied!';
-        setTimeout(() => {
-            button.textContent = original;
-        }, 2000);
-    }).catch(err => {
-        console.error('Failed to copy: ', err);
-        button.textContent = 'Failed';
-    });
-}
-
-form.onsubmit = async (e) => {
-    e.preventDefault();
-    result.innerHTML = "Uploading...";
-    const fd = new FormData(form);
-
-    try {
-        const res = await fetch('/upload', { method: 'POST', body: fd });
-        const data = await res.json();
-
-        if (data.success) {
-            let html = '✅ <strong>Upload Successful!</strong><br><br>';
-            data.uploads.forEach(u => {
-                const safeName = u.name.replace(/</g, "&lt;").replace(/>/g, "&gt;");
-                html += `
-                <div class="upload-item">
-                    <b>${safeName || 'Shared Text'}</b>
-                    <div class="key-line">
-                        Key: ${u.key} 
-                        <button class="copy-btn" onclick="copyToClipboard('${u.key}', this)">Copy</button>
-                    </div>
-                    <div>
-                        <a href="/download/${u.key}" target="_blank">Download Page</a> • 
-                        <a href="${u.link}" target="_blank">Direct Link</a>
-                    </div>
-                </div>
-                `;
-            });
-            result.innerHTML = html;
-        } else {
-            let msg = data.error || 'Upload failed';
-            if (data.details) msg += `<br><small>${JSON.stringify(data.details)}</small>`;
-            result.innerHTML = `❌ <strong>Upload failed:</strong> ${msg}`;
-        }
-    } catch (err) {
-        result.innerHTML = `⚠️ <strong>Error:</strong> ${err.message}`;
-    }
-};
-</script>
+<script id="bannedExtensions" type="application/json">{{ banned_exts | tojson }}</script>
 </body>
 </html>
