@@ -129,12 +129,19 @@ function renderUpload(upload, batch) {
         link.rel = "noopener noreferrer";
         links.append(link);
     }
-    const qrLink = document.createElement("a");
-    qrLink.textContent = "QR Code";
-    qrLink.href = `/qr/${upload.key}`;
-    qrLink.target = "_blank";
-    qrLink.rel = "noopener noreferrer";
-    links.append(qrLink);
+    const qrDetails = document.createElement("details");
+    qrDetails.className = "qr-details";
+    const qrSummary = document.createElement("summary");
+    qrSummary.textContent = "Show QR Code";
+    const qrImg = document.createElement("img");
+    qrImg.src = `/qr/${upload.key}`;
+    qrImg.alt = `QR code for ${upload.key}`;
+    qrImg.loading = "lazy";
+    qrImg.width = 200;
+    qrImg.height = 200;
+    qrImg.className = "qr-inline";
+    qrDetails.append(qrSummary, qrImg);
+    links.append(qrDetails);
     const expiryLine = document.createElement("p");
     const time = document.createElement("time");
     time.dateTime = expires.toISOString();

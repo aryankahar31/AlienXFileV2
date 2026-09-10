@@ -716,3 +716,15 @@ button:disabled { opacity: 0.6; }
 .result-links { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .result-links a { display: inline-flex; align-items: center; }
 .upload-item p, #result h3 { margin-bottom: 10px; }
+.qr-details { margin-top: 10px; }
+.qr-details summary { cursor: pointer; font-weight: 600; font-size: 14px; min-height: 44px; display: flex; align-items: center; }
+.qr-inline {
+    display: block;
+    width: 200px;
+    height: 200px;
+    border: 3px solid var(--black);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-sm);
+    background: #fff;
+    margin-top: 8px;
+}
