@@ -42,6 +42,8 @@ app.config.update(
     UPLOAD_RATE_LIMIT=10,
     LOOKUP_RATE_LIMIT=30,
     RATE_WINDOW_SECONDS=600,
+    LITTERBOX_PROXY_URL=os.environ.get('LITTERBOX_PROXY_URL', ''),
+    LITTERBOX_PROXY_SECRET=os.environ.get('LITTERBOX_PROXY_SECRET', ''),
     TRUST_PYTHONANYWHERE_PROXY=os.environ.get('ALIENX_PYTHONANYWHERE') == '1',
     TRUST_RENDER_PROXY=os.environ.get('RENDER') == 'true' and os.environ.get('RENDER_SERVICE_TYPE') == 'web',
 )
@@ -367,21 +369,38 @@ def upload():
                         raise ValueError('Invalid private storage response.')
                     stored_blob = link = checked_blob_url(result.get('url'))
             else:
-                # Stream the temporary file; requests' files= would buffer the full multipart body.
-                body = MultipartEncoder(fields={
-                    'reqtype': 'fileupload', 'time': expiry,
-                    'fileToUpload': (filename, file.stream, 'application/octet-stream'),
-                })
-                with requests.post(
-                    'https://litterbox.catbox.moe/resources/internals/api.php', data=body,
-                    headers={'Content-Type': body.content_type}, timeout=(10, 180), allow_redirects=False,
-                ) as response:
-                    response.raise_for_status()
-                    link = response.text.strip()
-                    if response.status_code != 200 or not re.fullmatch(
-                        r'https://litter\.catbox\.moe/[A-Za-z0-9][A-Za-z0-9._-]*', link
-                    ):
-                        raise ValueError('Storage provider returned an invalid file link.')
+                proxy_url = app.config.get('LITTERBOX_PROXY_URL', '')
+                proxy_secret = app.config.get('LITTERBOX_PROXY_SECRET', '')
+                if proxy_url:
+                    # Route through PythonAnywhere proxy (Render's IP is blocked by Litterbox).
+                    body = MultipartEncoder(fields={
+                        'time': expiry,
+                        'fileToUpload': (filename, file.stream, 'application/octet-stream'),
+                    })
+                    with requests.post(
+                        proxy_url.rstrip('/') + '/proxy/litterbox', data=body,
+                        headers={'Content-Type': body.content_type,
+                                 'X-Proxy-Secret': proxy_secret},
+                        timeout=(10, 180), allow_redirects=False,
+                    ) as response:
+                        if response.status_code != 200:
+                            raise ValueError(f'Proxy error (HTTP {response.status_code}).')
+                        result = response.json()
+                        link = result.get('url', '')
+                else:
+                    # Direct upload (may fail from Render — use proxy instead).
+                    body = MultipartEncoder(fields={
+                        'reqtype': 'fileupload', 'time': expiry,
+                        'fileToUpload': (filename, file.stream, 'application/octet-stream'),
+                    })
+                    with requests.post(
+                        'https://litterbox.catbox.moe/resources/internals/api.php', data=body,
+                        headers={'Content-Type': body.content_type}, timeout=(10, 180), allow_redirects=False,
+                    ) as response:
+                        response.raise_for_status()
+                        link = response.text.strip()
+                if not re.fullmatch(r'https://litter\.catbox\.moe/[A-Za-z0-9][A-Za-z0-9._-]*', link):
+                    raise ValueError('Storage provider returned an invalid file link.')
             uploads.append(save_share('file', filename, size, expires, url=link, provider=provider))
         except (requests.RequestException, ValueError, OSError, sqlite3.Error, psycopg.Error) as exc:
             if stored_blob:
