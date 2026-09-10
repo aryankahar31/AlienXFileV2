@@ -294,7 +294,7 @@ form.addEventListener("submit", async event => {
                     }
                     status.textContent = `${label}: file uploaded to storage. Saving share record...`;
                     const saveData = JSON.stringify({ url: litterboxUrl, name: file.name, size: file.size, expire });
-                    const saveXhr = await uploadRequest(saveData, label, form.action, {"Content-Type": "application/json"});
+                    const saveXhr = await uploadRequest(saveData, label, "/upload-litterbox", {"Content-Type": "application/json"});
                     let saveResponse;
                     try {
                         saveResponse = JSON.parse(saveXhr.responseText);
