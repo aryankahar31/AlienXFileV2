@@ -147,7 +147,7 @@ function renderUpload(upload, batch) {
     batch.append(item);
 }
 
-const LITTERBOX_PROXY_URL = "https://alienxfilev2.pythonanywhere.com";
+const LITTERBOX_PROXY_URL = "https://alienxfile-proxy.fly.dev";
 
 function uploadRequest(data, label, url, headers) {
     return new Promise((resolve, reject) => {

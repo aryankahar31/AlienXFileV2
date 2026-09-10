@@ -18,7 +18,7 @@ app = Flask(__name__)
 
 PROXY_SECRET = os.environ.get('LITTERBOX_PROXY_SECRET', '')
 LITTERBOX_URL = 'https://litterbox.catbox.moe/resources/internals/api.php'
-ALLOWED_ORIGINS = {'https://alienxfilev2.onrender.com', 'http://localhost:5000', 'http://127.0.0.1:5000'}
+ALLOWED_ORIGINS = {'https://alienxfilev2.onrender.com', 'https://alienxfile-proxy.fly.dev', 'http://localhost:5000', 'http://127.0.0.1:5000'}
 
 
 def create_session():
