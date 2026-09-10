@@ -7,7 +7,6 @@ Two endpoints:
 
 import os
 import re
-from io import BytesIO
 
 import requests
 from flask import Flask, jsonify, request
@@ -15,6 +14,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 1 * 1024 * 1024 * 1024
 
 PROXY_SECRET = os.environ.get('LITTERBOX_PROXY_SECRET', '')
 LITTERBOX_URL = 'https://litterbox.catbox.moe/resources/internals/api.php'
@@ -35,9 +35,9 @@ def _upload_to_litterbox(file, expiry):
     response = session.post(
         LITTERBOX_URL,
         data={'reqtype': 'fileupload', 'time': expiry},
-        files={'fileToUpload': (file.filename, BytesIO(file.read()))},
+        files={'fileToUpload': (file.filename, file.read())},
         headers={'User-Agent': 'curl/8.5.0'},
-        timeout=(30, 300),
+        timeout=(60, 600),
     )
     link = response.text.strip()
     if not link.startswith('https://'):
