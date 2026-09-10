@@ -424,6 +424,32 @@ def upload():
     return jsonify(success=bool(uploads), uploads=uploads, errors=errors), 200 if uploads else 400
 
 
+@app.route('/upload-litterbox', methods=['POST'])
+def upload_litterbox():
+    """Accept a pre-uploaded Litterbox URL from the browser (direct upload path)."""
+    data = request.get_json(silent=True) or {}
+    url = (data.get('url') or '').strip()
+    name = (data.get('name') or '').strip()[:255]
+    size = data.get('size', 0)
+    expire = data.get('expire', '1h')
+    if expire not in expire_seconds:
+        return error_response('Choose a valid share mode and expiration.', 400)
+    if not name:
+        name = 'Shared File'
+    if not re.fullmatch(r'https://litter\.catbox\.moe/[A-Za-z0-9][A-Za-z0-9._-]*', url):
+        return error_response('Invalid Litterbox URL.', 400)
+    if not isinstance(size, (int, float)) or size < 0 or size > MAX_FILE_BYTES:
+        return error_response('Invalid file size.', 400)
+    if Path(name).suffix.lower() in banned_exts:
+        return error_response(f'{name}: This file extension is blocked.', 400)
+    try:
+        shared = save_share('file', name, int(size), time.time() + expire_seconds[expire],
+                            url=url, provider='litterbox')
+    except ValueError as exc:
+        return error_response(str(exc), 503)
+    return jsonify(success=True, uploads=[shared], errors=[])
+
+
 @app.route('/qr/<key>', endpoint='share_qr')
 @app.route('/share/<key>', endpoint='download_details')
 @app.route('/download/<key>', endpoint='download_direct')

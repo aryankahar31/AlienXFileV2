@@ -147,27 +147,30 @@ function renderUpload(upload, batch) {
     batch.append(item);
 }
 
-function uploadRequest(data, label) {
+const LITTERBOX_PROXY_URL = "https://alienxfilev2.pythonanywhere.com";
+
+function uploadRequest(data, label, url, headers) {
     return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         activeRequest = xhr;
-        xhr.open("POST", form.action);
+        xhr.open("POST", url || form.action);
         xhr.timeout = 30 * 60 * 1000;
+        if (headers) for (const [k, v] of Object.entries(headers)) xhr.setRequestHeader(k, v);
         xhr.upload.onprogress = event => {
             if (!event.lengthComputable) {
                 progress.removeAttribute("value");
-                status.textContent = `${label}: uploading browser to app; percentage unavailable.`;
+                status.textContent = `${label}: uploading; percentage unavailable.`;
                 return;
             }
             const percent = Math.floor(event.loaded / event.total * 100);
             progress.value = percent;
             status.textContent = percent === 100
-                ? `${label}: 100% browser to app. Waiting for storage provider / server confirmation.`
-                : `${label}: ${percent}% browser to app only.`;
+                ? `${label}: 100% uploaded. Waiting for storage provider / server confirmation.`
+                : `${label}: ${percent}% uploaded.`;
         };
         xhr.upload.onload = () => {
             progress.value = 100;
-            status.textContent = `${label}: 100% browser to app. Waiting for storage provider / server confirmation.`;
+            status.textContent = `${label}: 100% uploaded. Waiting for storage provider / server confirmation.`;
         };
         xhr.onload = () => resolve(xhr);
         xhr.onerror = () => reject(new Error("Network error. Check your connection. The server may already have stored this item; verify before retrying."));
@@ -231,45 +234,90 @@ form.addEventListener("submit", async event => {
                 continue;
             }
             const label = `${index + 1}/${queue.length} - ${name}`;
-            const data = new FormData();
-            data.append("mode", mode);
-            data.append("expire", expire);
-            if (mode === "file") data.append("storageProvider", storageProvider);
-            data.append(mode === "file" ? "file" : "text", file || text);
             progress.value = 0;
-            status.textContent = `${label}: 0% browser to app only.`;
+            status.textContent = `${label}: 0% uploaded.`;
             try {
-                // One file per request keeps the batch total out of the request-size limit.
-                const xhr = await uploadRequest(data, label);
-                const httpError = xhr.status === 413
-                    ? "Upload too large for this deployment or host (413). Try a smaller file; hosting may cap uploads below the displayed limit."
-                    : xhr.status === 429
-                        ? "Too many requests (429). Wait before trying again."
-                        : `Upload failed (HTTP ${xhr.status}). The server or host could not complete the request.`;
-                let response;
-                try {
-                    response = JSON.parse(xhr.responseText);
-                } catch {
-                    throw new Error(xhr.status >= 200 && xhr.status < 300
-                        ? "The server returned an unreadable response. This item may have been stored; verify before retrying."
-                        : httpError);
-                }
-                if (!response || typeof response !== "object") throw new Error("Invalid server response. Verify before retrying.");
-                const uploads = Array.isArray(response.uploads) ? response.uploads : [];
-                const errors = Array.isArray(response.errors) ? response.errors.filter(error => typeof error === "string") : [];
-                if (typeof response.error === "string" && response.error) errors.push(`${name}: ${response.error}`);
-                for (const upload of uploads) {
+                if (mode === "text" || storageProvider === "vercel") {
+                    const data = new FormData();
+                    data.append("mode", mode);
+                    data.append("expire", expire);
+                    if (mode === "file") data.append("storageProvider", storageProvider);
+                    data.append(mode === "file" ? "file" : "text", file || text);
+                    const xhr = await uploadRequest(data, label);
+                    const httpError = xhr.status === 413
+                        ? "Upload too large for this deployment or host (413). Try a smaller file; hosting may cap uploads below the displayed limit."
+                        : xhr.status === 429
+                            ? "Too many requests (429). Wait before trying again."
+                            : `Upload failed (HTTP ${xhr.status}). The server or host could not complete the request.`;
+                    let response;
                     try {
-                        renderUpload(upload, batch);
-                        completed++;
+                        response = JSON.parse(xhr.responseText);
                     } catch {
-                        addError(`${name}: Invalid share details returned. The item may have been stored; verify before retrying.`);
+                        throw new Error(xhr.status >= 200 && xhr.status < 300
+                            ? "The server returned an unreadable response. This item may have been stored; verify before retrying."
+                            : httpError);
                     }
+                    if (!response || typeof response !== "object") throw new Error("Invalid server response. Verify before retrying.");
+                    const uploads = Array.isArray(response.uploads) ? response.uploads : [];
+                    const errors = Array.isArray(response.errors) ? response.errors.filter(error => typeof error === "string") : [];
+                    if (typeof response.error === "string" && response.error) errors.push(`${name}: ${response.error}`);
+                    for (const upload of uploads) {
+                        try {
+                            renderUpload(upload, batch);
+                            completed++;
+                        } catch {
+                            addError(`${name}: Invalid share details returned. The item may have been stored; verify before retrying.`);
+                        }
+                    }
+                    for (const error of errors) addError(error);
+                    if ((xhr.status < 200 || xhr.status >= 300) && !errors.length) addError(`${name}: ${httpError}`);
+                    else if (!uploads.length && !errors.length) addError(`${name}: No completed upload was returned.`);
+                    else if (response.success !== true && !errors.length) addError(`${name}: The server reported a failure; any completed uploads are shown above.`);
+                } else {
+                    const paData = new FormData();
+                    paData.append("time", expire);
+                    paData.append("fileToUpload", file);
+                    status.textContent = `${label}: uploading directly to storage...`;
+                    const paXhr = await uploadRequest(paData, label, LITTERBOX_PROXY_URL + "/upload");
+                    let paResponse;
+                    try {
+                        paResponse = JSON.parse(paXhr.responseText);
+                    } catch {
+                        throw new Error("Storage proxy returned an unreadable response. Verify before retrying.");
+                    }
+                    if (!paResponse || paResponse.error) {
+                        throw new Error(paResponse?.error || "Storage proxy rejected the upload.");
+                    }
+                    const litterboxUrl = paResponse.url;
+                    if (!litterboxUrl || !litterboxUrl.startsWith("https://litter.catbox.moe/")) {
+                        throw new Error("Storage proxy returned an invalid URL.");
+                    }
+                    status.textContent = `${label}: file uploaded to storage. Saving share record...`;
+                    const saveData = JSON.stringify({ url: litterboxUrl, name: file.name, size: file.size, expire });
+                    const saveXhr = await uploadRequest(saveData, label, form.action, {"Content-Type": "application/json"});
+                    let saveResponse;
+                    try {
+                        saveResponse = JSON.parse(saveXhr.responseText);
+                    } catch {
+                        throw new Error("Server returned an unreadable response after storage upload. Verify before retrying.");
+                    }
+                    if (!saveResponse || typeof saveResponse !== "object") throw new Error("Invalid server response. Verify before retrying.");
+                    const uploads = Array.isArray(saveResponse.uploads) ? saveResponse.uploads : [];
+                    const errors = Array.isArray(saveResponse.errors) ? saveResponse.errors.filter(e => typeof e === "string") : [];
+                    if (typeof saveResponse.error === "string" && saveResponse.error) errors.push(`${name}: ${saveResponse.error}`);
+                    for (const upload of uploads) {
+                        try {
+                            renderUpload(upload, batch);
+                            completed++;
+                        } catch {
+                            addError(`${name}: Invalid share details returned. The item may have been stored; verify before retrying.`);
+                        }
+                    }
+                    for (const error of errors) addError(error);
+                    if ((saveXhr.status < 200 || saveXhr.status >= 300) && !errors.length) addError(`${name}: Save failed (HTTP ${saveXhr.status}). The file was uploaded to storage but the share record may not have been saved.`);
+                    else if (!uploads.length && !errors.length) addError(`${name}: No completed upload was returned.`);
+                    else if (saveResponse.success !== true && !errors.length) addError(`${name}: The server reported a failure; any completed uploads are shown above.`);
                 }
-                for (const error of errors) addError(error);
-                if ((xhr.status < 200 || xhr.status >= 300) && !errors.length) addError(`${name}: ${httpError}`);
-                else if (!uploads.length && !errors.length) addError(`${name}: No completed upload was returned.`);
-                else if (response.success !== true && !errors.length) addError(`${name}: The server reported a failure; any completed uploads are shown above.`);
             } catch (error) {
                 addError(`${name}: ${error.message}`);
             } finally {
