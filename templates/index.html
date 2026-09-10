@@ -21,7 +21,7 @@
     <script type="application/ld+json">
     {{ {'@context': 'https://schema.org', '@type': 'WebSite', 'name': 'AlienXFile', 'alternateName': 'AlienXFile V2', 'url': site_url, 'description': description}|tojson }}
     </script>
-    <script src="{{ url_for('static', filename='upload.js') }}" defer></script>
+    <script src="{{ url_for('static', filename='upload.js') }}?v=2" defer></script>
     <style>
         :root {
             --accent-color: #A7C7E7; /* Soft pastel blue for neutrality */
