@@ -228,7 +228,9 @@ def response_headers(response):
     response.headers['Referrer-Policy'] = 'no-referrer'
     response.headers['Content-Security-Policy'] = (
         "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
-        "img-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+        "connect-src 'self' https://alienxfile-proxy.fly.dev; "
+        "img-src 'self' data: https://litter.catbox.moe; "
+        "object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
     )
     if request.endpoint != 'static':
         response.headers['Cache-Control'] = 'no-store'
