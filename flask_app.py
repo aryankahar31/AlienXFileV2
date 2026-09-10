@@ -12,7 +12,7 @@ from pathlib import Path
 import qrcode
 import psycopg
 import requests
-from flask import Flask, Response, g, jsonify, redirect, render_template, request, url_for
+from flask import Flask, Response, g, jsonify, redirect, render_template, request, send_from_directory, url_for
 from qrcode.image.svg import SvgPathImage
 from psycopg.rows import dict_row
 from requests_toolbelt.multipart.encoder import MultipartEncoder
@@ -267,6 +267,11 @@ def sitemap():
 def indexnow_key():
     key = app.config['INDEXNOW_KEY']
     return Response(key, status=200 if key else 404, mimetype='text/plain')
+
+
+@app.route('/googled943441d68fdfc65.html')
+def google_site_verification():
+    return send_from_directory(app.root_path, 'googled943441d68fdfc65.html')
 
 
 @app.route('/download', methods=['GET', 'POST'])

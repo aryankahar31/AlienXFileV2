@@ -664,6 +664,17 @@ with patch('flask_app.time.time', return_value=float(sys.argv[2])), patch(
         self.assertEqual(key.data, b'a' * 32)
         self.assertIn('noindex', key.headers['X-Robots-Tag'])
 
+    def test_google_verification_serves_only_the_exact_file(self):
+        filename = 'googled943441d68fdfc65.html'
+        with patch('flask_app.get_db', side_effect=AssertionError('Verification must not need a database')):
+            response = self.client.get('/' + filename)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, 'text/html')
+        self.assertEqual(response.data, Path(__file__).with_name(filename).read_bytes())
+        self.assertEqual(response.data.strip(), ('google-site-verification: ' + filename).encode())
+        response.close()
+        self.assertEqual(self.client.get('/README.md').status_code, 404)
+
     def test_lookup_upload_and_errors_are_not_indexable(self):
         for method, path in (('GET', '/download'), ('GET', '/share/99999'), ('GET', '/qr/99999'),
                              ('GET', '/download/99999'), ('GET', '/missing'), ('GET', '/static/missing'),
