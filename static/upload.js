@@ -11,6 +11,7 @@ const cancel = document.getElementById("cancelUpload");
 const result = document.getElementById("result");
 const bannedExts = JSON.parse(document.getElementById("bannedExtensions").textContent);
 const maxBytes = Number(form.dataset.maxBytes);
+const litterboxMaxBytes = Number(form.dataset.litterboxMaxBytes);
 const maxTextLength = Number(form.dataset.maxTextLength);
 let busy = false;
 let cancelled = false;
@@ -20,19 +21,29 @@ function switchMode() {
     const isFile = form.elements.mode.value === "file";
     document.getElementById("fileInputContainer").hidden = !isFile;
     document.getElementById("textInputContainer").hidden = isFile;
+    document.getElementById("storageOptions").disabled = !isFile;
     fileInput.disabled = !isFile;
     fileInput.required = isFile;
     textInput.disabled = isFile;
     textInput.required = !isFile;
 }
 
-function fileError(file) {
-    if (file.size > maxBytes) return `Exceeds the ${form.dataset.limitLabel} per-file limit.`;
+function fileError(file, storageProvider = form.elements.storageProvider.value) {
+    if (storageProvider === "litterbox") {
+        if (file.size > litterboxMaxBytes) return "This file exceeds Litterbox's 1 GB per-file limit.";
+    } else if (file.size > maxBytes) {
+        return `This file exceeds AlienXFile Storage's ${form.dataset.limitLabel} limit. Choose Litterbox Large Files to upload it.`;
+    }
     if (bannedExts.some(ext => file.name.toLowerCase().endsWith(ext))) return "This file extension is blocked.";
     return "";
 }
 
 function updateFiles() {
+    const isLitterbox = form.elements.storageProvider.value === "litterbox";
+    document.getElementById("fileLimits").textContent = isLitterbox
+        ? `Litterbox: up to approximately 1 GB per file (${litterboxMaxBytes.toLocaleString()} bytes). Hosting or the provider may reject large files.`
+        : `AlienXFile Storage: up to ${form.dataset.limitLabel} per file (${maxBytes.toLocaleString()} bytes).`;
+    document.getElementById("storageWarning").hidden = !isLitterbox;
     const list = document.getElementById("selectedFiles");
     list.replaceChildren();
     for (const file of fileInput.files) {
@@ -47,6 +58,11 @@ function updateFiles() {
 }
 
 form.querySelectorAll('input[name="mode"]').forEach(radio => radio.addEventListener("change", switchMode));
+form.querySelectorAll('input[name="storageProvider"]').forEach(radio => radio.addEventListener("change", updateFiles));
+form.addEventListener("reset", () => requestAnimationFrame(() => {
+    switchMode();
+    updateFiles();
+}));
 fileInput.addEventListener("change", updateFiles);
 fileLabel.addEventListener("dragover", event => {
     event.preventDefault();
@@ -172,6 +188,7 @@ form.addEventListener("submit", async event => {
     if (busy || !form.reportValidity()) return;
     const mode = form.elements.mode.value;
     const expire = form.elements.expire.value;
+    const storageProvider = form.elements.storageProvider.value;
     const text = textInput.value;
     if (mode === "text" && (!text.trim() || Array.from(text).length > maxTextLength)) {
         status.textContent = `Enter non-blank text of at most ${maxTextLength.toLocaleString()} characters.`;
@@ -208,7 +225,7 @@ form.addEventListener("submit", async event => {
                 addError(`${name}: Not started because the queue was cancelled.`);
                 continue;
             }
-            const validationError = file && fileError(file);
+            const validationError = file && fileError(file, storageProvider);
             if (validationError) {
                 addError(`${name}: ${validationError}`);
                 continue;
@@ -217,6 +234,7 @@ form.addEventListener("submit", async event => {
             const data = new FormData();
             data.append("mode", mode);
             data.append("expire", expire);
+            if (mode === "file") data.append("storageProvider", storageProvider);
             data.append(mode === "file" ? "file" : "text", file || text);
             progress.value = 0;
             status.textContent = `${label}: 0% browser to app only.`;
@@ -273,4 +291,5 @@ form.addEventListener("submit", async event => {
 });
 
 switchMode();
+updateFiles();
 controls.disabled = false;

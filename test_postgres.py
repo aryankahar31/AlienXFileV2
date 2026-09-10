@@ -154,10 +154,16 @@ with patch('flask_app.time.time', return_value=float(sys.argv[2])), patch(
         provider._content_consumed = True
         self.post.side_effect = None
         self.post.return_value = provider
-        response = self.client.post('/upload', data={'file': (BytesIO(b'small file'), 'tiny.txt')})
+        response = self.client.post('/upload', data={
+            'storageProvider': 'litterbox', 'file': (BytesIO(b'small file'), 'tiny.txt'),
+        })
         self.assertEqual(response.status_code, 200)
         share = response.get_json()['uploads'][0]
         self.assertEqual((share['type'], share['size']), ('file', 10))
+        self.assertEqual(share['storageProvider'], 'litterbox')
+        with app.app_context():
+            row = query(get_db(), 'SELECT provider FROM shares WHERE key = ?', (share['key'],)).fetchone()
+            self.assertEqual(row['provider'], 'litterbox')
         self.assertEqual(share['page_url'], 'http://localhost/share/' + share['key'])
         self.assertEqual(share['link'], 'http://localhost/download/' + share['key'])
         page = self.client.get(share['page_url'])
@@ -168,6 +174,61 @@ with patch('flask_app.time.time', return_value=float(sys.argv[2])), patch(
         self.assertEqual((direct.status_code, direct.location), (302, link))
         self.assertEqual(self.client.get('/qr/' + share['key']).mimetype, 'image/svg+xml')
         self.post.assert_called_once()
+
+    def test_legacy_migration_and_old_seven_value_writer(self):
+        columns = ('key', 'type', 'name', 'content', 'url', 'size', 'expires')
+        blob_url = 'https://teststore.private.blob.vercel-storage.com/shares/' + 'a' * 32 + '/report.pdf'
+        litterbox_url = 'https://litter.catbox.moe/legacy.txt'
+        legacy = [
+            ('00007', 'text', 'Shared Text', 'legacy note', None, 11, self.now + 3600),
+            ('00008', 'file', 'report.pdf', None, blob_url, 9, self.now + 3600),
+            ('00009', 'file', 'legacy.txt', None, litterbox_url, 1, self.now + 3600),
+            ('00010', 'file', 'expired.txt', None, litterbox_url, 1, self.now - 1),
+        ]
+        with app.app_context():
+            db = get_db()
+            # setUp created this unique, empty schema; never alter a shared schema.
+            self.assertEqual(db.execute('SELECT COUNT(*) AS n FROM shares').fetchone()['n'], 0)
+            db.execute('ALTER TABLE shares DROP COLUMN provider')
+            with transaction(db):
+                for row in legacy:
+                    query(db, '''INSERT INTO shares (key, type, name, content, url, size, expires)
+                                 VALUES (?, ?, ?, ?, ?, ?, ?)''', row)
+                query(db, 'INSERT INTO rate_limits VALUES (?, ?, ?, ?)',
+                      ('198.51.100.7', 'upload', self.now - 10, 3))
+        for _ in range(2):
+            result = app.test_cli_runner().invoke(args=['init-db'])
+            self.assertEqual(result.exit_code, 0, 'Legacy migration failed in isolated test schema')
+            with app.app_context():
+                db = get_db()
+                schema = db.execute('''SELECT column_name, data_type, column_default
+                                       FROM information_schema.columns
+                                       WHERE table_schema = current_schema() AND table_name = 'shares'
+                                       ORDER BY ordinal_position''').fetchall()
+                self.assertEqual([row['column_name'] for row in schema], [*columns, 'provider'])
+                self.assertEqual(schema[-1]['data_type'], 'text')
+                self.assertEqual(schema[-1]['column_default'], "'vercel'::text")
+                rows = db.execute('SELECT * FROM shares ORDER BY key').fetchall()
+                self.assertEqual([tuple(row[name] for name in columns) for row in rows], legacy)
+                self.assertEqual([row['provider'] for row in rows], [None, 'vercel', 'litterbox', 'litterbox'])
+                self.assertEqual(db.execute('SELECT * FROM rate_limits').fetchall(), [dict(
+                    ip='198.51.100.7', action='upload', started=self.now - 10, hits=3,
+                )])
+                self.assertIsNotNone(db.execute("SELECT to_regclass('shares_expiry') AS idx").fetchone()['idx'])
+        with app.app_context():
+            db = get_db()
+            old_worker_row = ('00011', 'file', 'report.pdf', None, blob_url, 9, self.now + 3600)
+            # PostgreSQL permits old positional inserts to omit a trailing defaulted column.
+            query(db, 'INSERT INTO shares VALUES (?, ?, ?, ?, ?, ?, ?)', old_worker_row)
+            row = query(db, 'SELECT * FROM shares WHERE key = ?', ('00011',)).fetchone()
+            self.assertEqual(tuple(row[name] for name in columns), old_worker_row)
+            self.assertEqual(row['provider'], 'vercel')
+        self.assertIn(b'legacy note', self.client.get('/share/00007').data)
+        self.assertEqual(self.client.get('/share/00008').status_code, 200)
+        self.assertEqual(self.client.get('/download/00009').location, litterbox_url)
+        self.assertEqual(self.client.get('/download/00010').status_code, 410)
+        self.assertEqual(self.client.get('/download/00010').status_code, 404)
+        self.post.assert_not_called()
 
     def test_outage_returns_safe_json_and_html_503(self):
         secret = 'postgresql://private_user:private_password@private_host/private_database'

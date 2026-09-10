@@ -8,7 +8,7 @@ import sys
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack
+from contextlib import ExitStack, closing
 from datetime import datetime
 from email import policy
 from email.parser import BytesParser
@@ -27,6 +27,8 @@ from flask_app import app, get_db
 
 
 FILE_URL = 'https://litter.catbox.moe/abc123.txt'
+BLOB_TOKEN = 'vercel_blob_rw_teststore_fakecredential'
+BLOB_URL = 'https://teststore.private.blob.vercel-storage.com/shares/' + 'a' * 32 + '/report.pdf'
 
 
 class Markup(HTMLParser):
@@ -48,6 +50,8 @@ class DownloadTest(unittest.TestCase):
         self.addCleanup(contexts.close)
         contexts.enter_context(patch.dict(app.config, TESTING=True, DATABASE=self.database, DATABASE_URL=None, BLOB_READ_WRITE_TOKEN='',
                                      INDEXNOW_KEY='',
+                                     UPLOAD_MAX_BYTES=95_000_000, LITTERBOX_MAX_BYTES=1_000_000_000,
+                                     MAX_CONTENT_LENGTH=1_001_000_000,
                                      UPLOAD_RATE_LIMIT=1000, LOOKUP_RATE_LIMIT=1000,
                                      RATE_WINDOW_SECONDS=60, TRUST_PYTHONANYWHERE_PROXY=False, TRUST_RENDER_PROXY=False))
         self.now = 1_800_000_000
@@ -91,6 +95,7 @@ class DownloadTest(unittest.TestCase):
         share, = result['uploads']
         self.assertEqual(share['key'], '00007')
         self.assertEqual(share['type'], 'text')
+        self.assertIsNone(share['storageProvider'])
         self.assertEqual(share['name'], 'Shared Text')
         self.assertEqual(share['size'], len(text.encode('utf-8')))
         self.assertNotIn('content', share)
@@ -203,14 +208,19 @@ class DownloadTest(unittest.TestCase):
             return provider
 
         self.post.side_effect = consume
-        with patch('flask_app.secrets.randbelow', return_value=42):
+        with patch('flask_app.secrets.randbelow', return_value=42), \
+                patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN), \
+                patch('flask_app.requests.put', side_effect=AssertionError('Unexpected Blob upload')) as put:
             response = self.client.post('/upload', data={
-                'expire': '24h', 'file': (BytesIO(payload), '../../my report?.txt'),
+                'storageProvider': 'litterbox', 'expire': '24h',
+                'file': (BytesIO(payload), '../../my report?.txt'),
             })
+            put.assert_not_called()
         self.assertEqual(response.status_code, 200)
         share, = response.get_json()['uploads']
         self.assertEqual(share['key'], '00042')
         self.assertEqual(share['type'], 'file')
+        self.assertEqual(share['storageProvider'], 'litterbox')
         self.assertEqual(share['name'], 'my_report.txt')
         self.assertEqual(share['size'], len(payload))
         self.assertEqual(datetime.fromisoformat(share['expires']).timestamp(), self.now + 86400)
@@ -238,7 +248,9 @@ class DownloadTest(unittest.TestCase):
                      'https://litter.catbox.moe/a\nb.txt', 'https://litter.catbox.moe/a\tb.txt'):
             with self.subTest(link=link):
                 self.mock_provider(link)
-                response = self.client.post('/upload', data={'file': (BytesIO(b'x'), 'test.txt')})
+                response = self.client.post('/upload', data={
+                    'storageProvider': 'litterbox', 'file': (BytesIO(b'x'), 'test.txt'),
+                })
                 self.assertEqual(response.status_code, 400)
                 self.assertFalse(response.get_json()['success'])
                 self.assertEqual(response.get_json()['uploads'], [])
@@ -247,30 +259,47 @@ class DownloadTest(unittest.TestCase):
             self.assertEqual(get_db().execute('SELECT COUNT(*) FROM shares').fetchone()[0], 0)
 
     def test_provider_http_errors_do_not_create_shares(self):
-        for status in (301, 302, 307, 400, 429, 500, 503):
-            with self.subTest(status=status):
-                self.mock_provider(status=status)
-                response = self.client.post('/upload', data={'file': (BytesIO(b'x'), 'test.txt')})
+        for status in (301, 302, 307, 400, 403, 429, 500, 503):
+            with self.subTest(status=status), patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN), \
+                    patch('flask_app.requests.put', side_effect=AssertionError('Unexpected Blob fallback')) as put:
+                self.mock_provider('<html><body>private upstream detail</body></html>', status=status)
+                response = self.client.post('/upload', data={
+                    'storageProvider': 'litterbox', 'file': (BytesIO(b'x'), 'test.txt'),
+                })
                 self.assertEqual(response.status_code, 400)
                 self.assertFalse(response.get_json()['success'])
                 self.assertEqual(response.get_json()['uploads'], [])
+                self.assertEqual(len(response.get_json()['errors']), 1)
+                self.assertNotIn(b'<html', response.data)
+                self.assertNotIn(b'private upstream detail', response.data)
+                if status == 403:
+                    self.assertIn('HTTP 403', response.get_json()['errors'][0])
+                put.assert_not_called()
         with app.app_context():
             self.assertEqual(get_db().execute('SELECT COUNT(*) FROM shares').fetchone()[0], 0)
 
     def test_provider_transport_errors_are_safe(self):
         for error in (requests.Timeout('private provider detail'),
                       requests.ConnectionError('private provider detail')):
-            with self.subTest(error=type(error).__name__):
+            with self.subTest(error=type(error).__name__), patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN), \
+                    patch('flask_app.requests.put', side_effect=AssertionError('Unexpected Blob fallback')) as put:
                 self.post.side_effect = error
-                response = self.client.post('/upload', data={'file': (BytesIO(b'x'), 'test.txt')})
+                response = self.client.post('/upload', data={
+                    'storageProvider': 'litterbox', 'file': (BytesIO(b'x'), 'test.txt'),
+                })
                 self.assertEqual(response.status_code, 400)
                 self.assertFalse(response.get_json()['success'])
                 self.assertEqual(response.get_json()['uploads'], [])
                 self.assertEqual(len(response.get_json()['errors']), 1)
                 self.assertNotIn(b'private provider detail', response.data)
+                if isinstance(error, requests.Timeout):
+                    self.assertRegex(response.get_json()['errors'][0].lower(), r'timed out|timeout')
+                put.assert_not_called()
+        with app.app_context():
+            self.assertEqual(get_db().execute('SELECT COUNT(*) FROM shares').fetchone()[0], 0)
 
     def test_all_failed_and_partial_file_batches(self):
-        response = self.client.post('/upload', data={'file': [
+        response = self.client.post('/upload', data={'storageProvider': 'litterbox', 'file': [
             (BytesIO(b'x'), 'BAD.EXE'), (BytesIO(b'x'), '../../'),
         ]})
         self.assertEqual(response.status_code, 400)
@@ -280,7 +309,7 @@ class DownloadTest(unittest.TestCase):
         self.post.assert_not_called()
         provider = self.mock_provider()
         self.post.side_effect = [provider, requests.Timeout('private')]
-        response = self.client.post('/upload', data={'file': [
+        response = self.client.post('/upload', data={'storageProvider': 'litterbox', 'file': [
             (BytesIO(b'good'), 'good.txt'), (BytesIO(b'x'), 'bad.CmD'),
             (BytesIO(b'failed'), 'failed.txt'),
         ]})
@@ -299,8 +328,8 @@ class DownloadTest(unittest.TestCase):
                          {'mode': 'text', 'text': ''}, {'mode': 'text', 'text': '   '},
                           {'mode': 'text', 'text': '12345'},
                           {'mode': 'text', 'text': '\x00'},
-                         {'file': [(BytesIO(b'x'), f'{i}.txt') for i in range(11)]},
-                         {'file': (BytesIO(b'x'), 'a' * 256 + '.txt')}):
+                         {'storageProvider': 'litterbox', 'file': [(BytesIO(b'x'), f'{i}.txt') for i in range(11)]},
+                         {'storageProvider': 'litterbox', 'file': (BytesIO(b'x'), 'a' * 256 + '.txt')}):
                 with self.subTest(data=data):
                     response = self.client.post('/upload', data=data)
                     self.assertEqual(response.status_code, 400)
@@ -316,7 +345,9 @@ class DownloadTest(unittest.TestCase):
 
     def test_request_limits_return_correct_error_formats(self):
         with patch.dict(app.config, MAX_CONTENT_LENGTH=512, UPLOAD_MAX_BYTES=512):
-            response = self.client.post('/upload', data={'file': (BytesIO(b'x' * 513), 'big.txt')})
+            response = self.client.post('/upload', data={
+                'storageProvider': 'litterbox', 'file': (BytesIO(b'x' * 513), 'big.txt'),
+            })
             self.assertEqual(response.status_code, 413)
             self.assertFalse(response.get_json()['success'])
             self.assertEqual(response.get_json()['uploads'], [])
@@ -328,20 +359,207 @@ class DownloadTest(unittest.TestCase):
 
     def test_per_file_limit_includes_boundary_not_multipart_overhead(self):
         self.mock_provider()
-        with patch.dict(app.config, UPLOAD_MAX_BYTES=8, MAX_CONTENT_LENGTH=4096):
-            for size, status in ((8, 200), (9, 400)):
-                with self.subTest(size=size):
+        with patch.dict(app.config, UPLOAD_MAX_BYTES=8, LITTERBOX_MAX_BYTES=32,
+                        MAX_CONTENT_LENGTH=4096, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN), \
+                patch('flask_app.requests.put') as put:
+            put.return_value.__enter__.return_value.status_code = 200
+            put.return_value.__enter__.return_value.json.return_value = {'url': BLOB_URL}
+            for provider, size, status in (
+                ('vercel', 0, 200), ('vercel', 8, 200), ('vercel', 9, 400),
+                ('litterbox', 0, 200), ('litterbox', 9, 200),
+                ('litterbox', 32, 200), ('litterbox', 33, 400),
+            ):
+                with self.subTest(provider=provider, size=size):
+                    calls = put.call_count, self.post.call_count
                     response = self.client.post('/upload', data={
+                        'storageProvider': provider,
                         'file': (BytesIO(b'x' * size), 'sized.txt'),
                     })
                     self.assertEqual(response.status_code, status)
                     self.assertEqual(response.get_json()['success'], status == 200)
-            self.post.assert_called_once()
-            response = self.client.post('/upload', data={'file': [
-                (BytesIO(b'x' * 8), 'one.txt'), (BytesIO(b'y' * 8), 'two.txt'),
-            ]})
-            self.assertEqual(response.status_code, 200)
-            self.assertEqual(len(response.get_json()['uploads']), 2)
+                    if status == 400:
+                        self.assertEqual(response.get_json()['uploads'], [])
+                        self.assertEqual((put.call_count, self.post.call_count), calls)
+                        if provider == 'vercel':
+                            self.assertIn('Litterbox', response.get_json()['errors'][0])
+            self.assertEqual(put.call_count, 2)
+            self.assertEqual(self.post.call_count, 3)
+            for provider, size in (('vercel', 8), ('litterbox', 32)):
+                response = self.client.post('/upload', data={'storageProvider': provider, 'file': [
+                    (BytesIO(b'x' * size), 'one.txt'), (BytesIO(b'y' * size), 'two.txt'),
+                ]})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(len(response.get_json()['uploads']), 2)
+        with app.app_context():
+            self.assertEqual(get_db().execute('SELECT COUNT(*) FROM shares').fetchone()[0], 9)
+
+    def test_provider_selection_and_all_expiration_mappings(self):
+        self.mock_provider()
+        with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN), \
+                patch('flask_app.requests.put') as put:
+            put.return_value.__enter__.return_value.status_code = 200
+            put.return_value.__enter__.return_value.json.return_value = {'url': BLOB_URL}
+            for expiry, seconds in (('1h', 3600), ('12h', 43200), ('24h', 86400), ('72h', 259200)):
+                for provider in ('vercel', 'litterbox'):
+                    with self.subTest(provider=provider, expiry=expiry):
+                        put.reset_mock()
+                        self.post.reset_mock()
+                        response = self.client.post('/upload', data={
+                            'storageProvider': provider, 'expire': expiry,
+                            'file': (BytesIO(b'x'), 'test.txt'),
+                        })
+                        self.assertEqual(response.status_code, 200)
+                        share, = response.get_json()['uploads']
+                        self.assertEqual(share['storageProvider'], provider)
+                        self.assertEqual(datetime.fromisoformat(share['expires']).timestamp(), self.now + seconds)
+                        with app.app_context():
+                            row = get_db().execute('SELECT * FROM shares WHERE key = ?', (share['key'],)).fetchone()
+                            self.assertEqual(row['provider'], provider)
+                            self.assertEqual(row['url'], BLOB_URL if provider == 'vercel' else FILE_URL)
+                        if provider == 'vercel':
+                            put.assert_called_once()
+                            self.post.assert_not_called()
+                        else:
+                            put.assert_not_called()
+                            self.post.assert_called_once()
+                            self.assertEqual(self.post.call_args.kwargs['data'].fields['time'], expiry)
+
+    def test_invalid_provider_and_missing_blob_token_never_fall_back(self):
+        with patch('flask_app.requests.put') as put:
+            for provider in ('', 'Vercel', 'unknown'):
+                response = self.client.post('/upload', data={
+                    'storageProvider': provider, 'file': (BytesIO(b'x'), 'test.txt'),
+                })
+                self.assertEqual(response.status_code, 400)
+                self.assertFalse(response.get_json()['success'])
+                self.assertEqual(response.get_json()['uploads'], [])
+            for selection in ({}, {'storageProvider': 'vercel'}):
+                for count, status in ((0, 400), (11, 400), (1, 503)):
+                    with self.subTest(selection=selection, count=count):
+                        response = self.client.post('/upload', data={
+                            **selection, 'file': [(BytesIO(b'x'), f'{i}.txt') for i in range(count)],
+                        })
+                        self.assertEqual(response.status_code, status)
+                        self.assertFalse(response.get_json()['success'])
+                        self.assertEqual(response.get_json()['uploads'], [])
+                        self.assertTrue(response.get_json()['error'])
+            put.assert_not_called()
+        self.post.assert_not_called()
+        with app.app_context():
+            self.assertEqual(get_db().execute('SELECT COUNT(*) FROM shares').fetchone()[0], 0)
+
+    def test_vercel_failure_never_retries_with_litterbox(self):
+        with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN), \
+                patch('flask_app.requests.put', side_effect=requests.Timeout('private detail')) as put:
+            response = self.client.post('/upload', data={
+                'storageProvider': 'vercel', 'file': (BytesIO(b'x'), 'test.txt'),
+            })
+            self.assertEqual(response.status_code, 400)
+            self.assertFalse(response.get_json()['success'])
+            self.assertEqual(response.get_json()['uploads'], [])
+            self.assertEqual(len(response.get_json()['errors']), 1)
+            self.assertNotIn(b'private detail', response.data)
+            put.assert_called_once()
+        self.post.assert_not_called()
+        with app.app_context():
+            self.assertEqual(get_db().execute('SELECT COUNT(*) FROM shares').fetchone()[0], 0)
+
+    def test_text_ignores_storage_provider_and_keeps_null_metadata(self):
+        with patch('flask_app.requests.put') as put:
+            for token in ('', BLOB_TOKEN):
+                for provider in ('vercel', 'litterbox', 'invalid'):
+                    with self.subTest(token_configured=bool(token), provider=provider), \
+                            patch.dict(app.config, BLOB_READ_WRITE_TOKEN=token):
+                        response = self.client.post('/upload', data={
+                            'mode': 'text', 'text': 'database only', 'storageProvider': provider,
+                        })
+                        self.assertEqual(response.status_code, 200)
+                        share, = response.get_json()['uploads']
+                        self.assertIsNone(share['storageProvider'])
+                        with app.app_context():
+                            row = get_db().execute('SELECT content, provider FROM shares WHERE key = ?',
+                                                   (share['key'],)).fetchone()
+                            self.assertEqual(tuple(row), ('database only', None))
+            put.assert_not_called()
+        self.post.assert_not_called()
+
+    def test_vercel_limit_message_uses_decimal_95_mb_and_suggests_litterbox(self):
+        # Report a large parsed-file size without allocating or sending a large body.
+        stream = BytesIO()
+        with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN), \
+                patch('flask.wrappers.Request._get_file_stream', return_value=stream), \
+                patch.object(stream, 'tell', return_value=95_000_001), \
+                patch('flask_app.requests.put') as put:
+            response = self.client.post('/upload', data={
+                'storageProvider': 'vercel', 'file': (BytesIO(b'x'), 'large.txt'),
+            })
+            self.assertEqual(response.status_code, 400)
+            self.assertFalse(response.get_json()['success'])
+            self.assertEqual(response.get_json()['uploads'], [])
+            error, = response.get_json()['errors']
+            self.assertIn('95 MB', error)
+            self.assertIn('Litterbox', error)
+            put.assert_not_called()
+        self.post.assert_not_called()
+        with app.app_context():
+            self.assertEqual(get_db().execute('SELECT COUNT(*) FROM shares').fetchone()[0], 0)
+
+    def test_default_provider_limits_leave_room_for_litterbox_requests(self):
+        result = subprocess.run([sys.executable, '-B', '-c', '''
+from flask_app import app
+assert app.config['UPLOAD_MAX_BYTES'] == 95_000_000
+assert app.config['LITTERBOX_MAX_BYTES'] == 1_000_000_000
+assert app.config['MAX_CONTENT_LENGTH'] == 1_001_000_000
+'''], cwd=Path(__file__).resolve().parent,
+            env={**{key: value for key, value in os.environ.items()
+                    if key not in {'ALIENX_UPLOAD_MAX_BYTES', 'ALIENX_LITTERBOX_MAX_BYTES'}},
+                 'DATABASE_URL': '', 'RENDER': '', 'ALIENX_DATABASE': self.database,
+                 'BLOB_READ_WRITE_TOKEN': ''},
+            capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, 'Default storage limits did not match the provider contract')
+
+    def test_sqlite_legacy_migration_preserves_data_and_codes(self):
+        columns = ('key', 'type', 'name', 'content', 'url', 'size', 'expires')
+        legacy = [
+            ('00007', 'text', 'Shared Text', 'legacy note', None, 11, self.now + 3600),
+            ('00008', 'file', 'report.pdf', None, BLOB_URL, 9, self.now + 3600),
+            ('00009', 'file', 'test.txt', None, FILE_URL, 1, self.now + 3600),
+            ('00010', 'file', 'expired.txt', None, FILE_URL, 1, self.now - 1),
+        ]
+        with closing(sqlite3.connect(self.database)) as db, db:
+            db.executescript('''
+                CREATE TABLE shares (
+                    key TEXT PRIMARY KEY, type TEXT NOT NULL, name TEXT NOT NULL,
+                    content TEXT, url TEXT, size INTEGER NOT NULL, expires DOUBLE PRECISION NOT NULL
+                );
+                CREATE INDEX shares_expiry ON shares(expires);
+                CREATE TABLE rate_limits (
+                    ip TEXT NOT NULL, action TEXT NOT NULL, started DOUBLE PRECISION NOT NULL,
+                    hits INTEGER NOT NULL, PRIMARY KEY (ip, action)
+                );
+            ''')
+            db.executemany('''INSERT INTO shares (key, type, name, content, url, size, expires)
+                              VALUES (?, ?, ?, ?, ?, ?, ?)''', legacy)
+            db.execute('INSERT INTO rate_limits VALUES (?, ?, ?, ?)',
+                       ('198.51.100.7', 'upload', self.now - 10, 3))
+        for _ in range(2):
+            with app.app_context():
+                db = get_db()
+                schema = db.execute('PRAGMA table_info(shares)').fetchall()
+                self.assertEqual([row['name'] for row in schema], [*columns, 'provider'])
+                self.assertEqual(schema[-1]['type'].upper(), 'TEXT')
+                rows = db.execute('SELECT * FROM shares ORDER BY key').fetchall()
+                self.assertEqual([tuple(row[name] for name in columns) for row in rows], legacy)
+                self.assertEqual([row['provider'] for row in rows], [None, 'vercel', 'litterbox', 'litterbox'])
+                rate, = db.execute('SELECT * FROM rate_limits').fetchall()
+                self.assertEqual(tuple(rate), ('198.51.100.7', 'upload', self.now - 10, 3))
+                self.assertIn('shares_expiry', [row['name'] for row in db.execute('PRAGMA index_list(shares)')])
+        self.assertIn(b'legacy note', self.client.get('/share/00007').data)
+        self.assertEqual(self.client.get('/share/00008').status_code, 200)
+        self.assertEqual(self.client.get('/download/00009').location, FILE_URL)
+        self.assertEqual(self.client.get('/download/00010').status_code, 410)
+        self.assertEqual(self.client.get('/download/00010').status_code, 404)
+        self.post.assert_not_called()
 
     def test_shares_persist_across_contexts_and_fresh_process(self):
         with app.app_context():
@@ -430,7 +648,7 @@ with patch('flask_app.time.time', return_value=float(sys.argv[2])), patch(
                 with self.subTest(kind=kind, route=route):
                     self.clock.return_value = self.now
                     data = {'mode': 'text', 'text': 'expires'} if kind == 'text' else {
-                        'file': (BytesIO(b'x'), 'expires.txt'),
+                        'storageProvider': 'litterbox', 'file': (BytesIO(b'x'), 'expires.txt'),
                     }
                     response = self.client.post('/upload', data=data)
                     self.assertEqual(response.status_code, 200)
@@ -550,7 +768,16 @@ with patch('flask_app.time.time', return_value=float(sys.argv[2])), patch(
             response = self.client.post('/upload', data={'file': (BytesIO(b'PDF bytes'), 'report.pdf')})
             self.assertEqual(response.status_code, 200)
             share = response.get_json()['uploads'][0]
+            self.assertEqual(share['storageProvider'], 'vercel')
+            with app.app_context():
+                db = get_db()
+                column = db.execute('PRAGMA table_info(shares)').fetchall()[-1]
+                self.assertEqual((column['name'], column['type'], column['dflt_value']),
+                                 ('provider', 'TEXT', "'vercel'"))
+                row = db.execute('SELECT provider FROM shares WHERE key = ?', (share['key'],)).fetchone()
+                self.assertEqual(row['provider'], 'vercel')
             self.assertEqual(put.call_args.kwargs['headers']['x-vercel-blob-access'], 'private')
+            self.assertEqual(put.call_args.kwargs['headers']['Authorization'], 'Bearer ' + token)
             self.assertEqual(put.call_args.kwargs['headers']['Content-Length'], '9')
             self.assertNotIsInstance(put.call_args.kwargs['data'], bytes)
             self.assertFalse(put.call_args.kwargs['allow_redirects'])
@@ -582,8 +809,9 @@ with patch('flask_app.time.time', return_value=float(sys.argv[2])), patch(
         with app.app_context():
             db = get_db()
             with db:
-                db.execute('INSERT INTO shares VALUES (?, ?, ?, ?, ?, ?, ?)',
-                           ('00007', 'file', 'report.pdf', None, url, 9, self.now - 1))
+                db.execute('''INSERT INTO shares (key, type, name, content, url, size, expires, provider)
+                              VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                           ('00007', 'file', 'report.pdf', None, url, 9, self.now - 1, 'vercel'))
         with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=token):
             self.mock_provider(status=503)
             self.assertEqual(self.client.get('/download/00007').status_code, 410)
@@ -602,10 +830,73 @@ with patch('flask_app.time.time', return_value=float(sys.argv[2])), patch(
                 with app.app_context():
                     db = get_db()
                     with db:
-                        db.execute('INSERT OR REPLACE INTO shares VALUES (?, ?, ?, ?, ?, ?, ?)',
-                                   ('00007', 'file', 'report.pdf', None, url, 9, self.now + 3600))
+                        db.execute('''INSERT OR REPLACE INTO shares
+                                      (key, type, name, content, url, size, expires, provider)
+                                      VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                                   ('00007', 'file', 'report.pdf', None, url, 9, self.now + 3600, 'vercel'))
                 self.assertEqual(self.client.get('/download/00007').status_code, 502)
             get.assert_not_called()
+
+    def test_download_uses_persisted_provider_and_validates_redirects(self):
+        cases = [
+            ('litterbox', FILE_URL, 302), ('vercel', FILE_URL, 502),
+            ('litterbox', BLOB_URL, 502), ('unknown', FILE_URL, 502),
+            (None, FILE_URL, 502), ('unknown', BLOB_URL, 502),
+        ]
+        cases.extend(('litterbox', url, 502) for url in (
+            'https://evil.example/a.txt', 'http://litter.catbox.moe/a.txt',
+            'https://litter.catbox.moe.evil.example/a.txt',
+            'https://user@litter.catbox.moe/a.txt', 'https://litter.catbox.moe:443/a.txt',
+            'https://litter.catbox.moe/../a.txt', 'https://litter.catbox.moe/a/b.txt',
+            FILE_URL + '?redirect=1', FILE_URL + '#fragment',
+            'https://litter.catbox.moe/a\nb.txt', 'https://litter.catbox.moe/a\tb.txt',
+        ))
+        with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN), \
+                patch('flask_app.requests.get') as get:
+            for provider, url, status in cases:
+                with self.subTest(provider=provider, url=url):
+                    with app.app_context():
+                        db = get_db()
+                        with db:
+                            db.execute('''INSERT OR REPLACE INTO shares
+                                          (key, type, name, content, url, size, expires, provider)
+                                          VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                                       ('00007', 'file', 'test.txt', None, url, 1, self.now + 3600, provider))
+                    response = self.client.get('/download/00007')
+                    self.assertEqual(response.status_code, status)
+                    self.assertNotIn(BLOB_TOKEN.encode(), response.data)
+                    if status == 302:
+                        self.assertEqual(response.location, FILE_URL)
+                    else:
+                        self.assertNotIn('Location', response.headers)
+                    get.assert_not_called()
+        self.post.assert_not_called()
+
+    def test_cleanup_only_deletes_remote_blobs_for_vercel_provider(self):
+        rows = [
+            ('00007', 'file', 'report.pdf', None, BLOB_URL, 9, self.now - 1, 'vercel'),
+            ('00008', 'file', 'test.txt', None, FILE_URL, 1, self.now - 1, 'litterbox'),
+            # A misleading URL must not turn a non-Vercel share into a Blob deletion.
+            ('00009', 'file', 'test.txt', None, BLOB_URL, 1, self.now - 1, 'litterbox'),
+            ('00010', 'file', 'test.txt', None, BLOB_URL, 1, self.now - 1, 'unknown'),
+            ('00011', 'text', 'Shared Text', 'expired', None, 7, self.now - 1, None),
+            ('00012', 'file', 'live.pdf', None, BLOB_URL, 9, self.now + 3600, 'vercel'),
+        ]
+        with app.app_context():
+            db = get_db()
+            with db:
+                db.executemany('''INSERT INTO shares (key, type, name, content, url, size, expires, provider)
+                                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)''', rows)
+        self.mock_provider()
+        with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN):
+            result = app.test_cli_runner().invoke(args=['cleanup-shares'])
+        self.assertEqual(result.exit_code, 0)
+        self.post.assert_called_once()
+        self.assertEqual(self.post.call_args.args[0], 'https://vercel.com/api/blob/delete')
+        self.assertEqual(self.post.call_args.kwargs['json'], {'urls': [BLOB_URL]})
+        with app.app_context():
+            remaining = get_db().execute('SELECT key FROM shares').fetchall()
+            self.assertEqual([row['key'] for row in remaining], ['00012'])
 
     def test_private_blob_removed_when_metadata_cannot_be_saved(self):
         url = 'https://teststore.private.blob.vercel-storage.com/shares/' + 'a' * 32 + '/report.pdf'
@@ -615,7 +906,9 @@ with patch('flask_app.time.time', return_value=float(sys.argv[2])), patch(
                 patch('flask_app.save_share', side_effect=sqlite3.OperationalError('database unavailable')):
             put.return_value.__enter__.return_value.status_code = 200
             put.return_value.__enter__.return_value.json.return_value = {'url': url}
-            response = self.client.post('/upload', data={'file': (BytesIO(b'PDF bytes'), 'report.pdf')})
+            response = self.client.post('/upload', data={
+                'storageProvider': 'vercel', 'file': (BytesIO(b'PDF bytes'), 'report.pdf'),
+            })
             self.assertEqual(response.status_code, 400)
             self.assertFalse(response.get_json()['success'])
             self.assertEqual(self.post.call_args.kwargs['json'], {'urls': [url]})

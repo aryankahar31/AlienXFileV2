@@ -25,16 +25,17 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 MAX_FILE_BYTES = 1_000_000_000  # 1 GB, decimal, plus separate multipart overhead below.
-upload_max_bytes = int(os.environ.get('ALIENX_UPLOAD_MAX_BYTES', MAX_FILE_BYTES))
-if not 0 < upload_max_bytes <= MAX_FILE_BYTES:
-    raise ValueError('ALIENX_UPLOAD_MAX_BYTES must be between 1 and 1000000000.')
+upload_max_bytes = int(os.environ.get('ALIENX_UPLOAD_MAX_BYTES', 95_000_000))
+if not 0 < upload_max_bytes <= 95_000_000:
+    raise ValueError('ALIENX_UPLOAD_MAX_BYTES must be between 1 and 95000000 for AlienXFile Storage.')
 app.config.update(
     DATABASE=os.environ.get('ALIENX_DATABASE', str(Path(__file__).with_name('shares.sqlite3'))),
     DATABASE_URL=os.environ.get('DATABASE_URL'),
     BLOB_READ_WRITE_TOKEN=os.environ.get('BLOB_READ_WRITE_TOKEN', '').strip(),
     INDEXNOW_KEY=os.environ.get('INDEXNOW_KEY', ''),
     UPLOAD_MAX_BYTES=upload_max_bytes,
-    MAX_CONTENT_LENGTH=upload_max_bytes + 1_000_000,
+    LITTERBOX_MAX_BYTES=MAX_FILE_BYTES,
+    MAX_CONTENT_LENGTH=MAX_FILE_BYTES + 1_000_000,
     MAX_FORM_MEMORY_SIZE=500_000,
     MAX_FORM_PARTS=20,
     MAX_TEXT_LENGTH=100_000,
@@ -52,13 +53,19 @@ BLOB_API = 'https://vercel.com/api/blob'
 SCHEMA = '''
     CREATE TABLE IF NOT EXISTS shares (
         key TEXT PRIMARY KEY, type TEXT NOT NULL, name TEXT NOT NULL,
-        content TEXT, url TEXT, size INTEGER NOT NULL, expires DOUBLE PRECISION NOT NULL
+        content TEXT, url TEXT, size INTEGER NOT NULL, expires DOUBLE PRECISION NOT NULL,
+        provider TEXT DEFAULT 'vercel'
     );
     CREATE INDEX IF NOT EXISTS shares_expiry ON shares(expires);
     CREATE TABLE IF NOT EXISTS rate_limits (
         ip TEXT NOT NULL, action TEXT NOT NULL, started DOUBLE PRECISION NOT NULL,
         hits INTEGER NOT NULL, PRIMARY KEY (ip, action)
     );
+'''
+BACKFILL_PROVIDER = '''
+    UPDATE shares SET provider = CASE
+        WHEN url LIKE 'https://litter.catbox.moe/%' THEN 'litterbox' ELSE 'vercel' END
+    WHERE type = 'file' AND provider IS NULL
 '''
 
 
@@ -72,6 +79,11 @@ def get_db():
             g.db = sqlite3.connect(app.config['DATABASE'], timeout=10)
             g.db.row_factory = sqlite3.Row
             g.db.executescript(SCHEMA)
+            with g.db:
+                g.db.execute('BEGIN IMMEDIATE')
+                if not any(column['name'] == 'provider' for column in g.db.execute('PRAGMA table_info(shares)')):
+                    g.db.execute('ALTER TABLE shares ADD COLUMN provider TEXT')
+                    g.db.execute(BACKFILL_PROVIDER)
     return g.db
 
 
@@ -91,6 +103,10 @@ def init_db():
         # Run once before Gunicorn workers start, not concurrent DDL on every request.
         with db.transaction():
             db.execute(SCHEMA)
+            db.execute('ALTER TABLE shares ADD COLUMN IF NOT EXISTS provider TEXT')
+            db.execute(BACKFILL_PROVIDER)
+            # Old Render workers can still finish seven-column Vercel inserts during deployment.
+            db.execute("ALTER TABLE shares ALTER COLUMN provider SET DEFAULT 'vercel'")
 
 
 @app.teardown_appcontext
@@ -104,10 +120,11 @@ def close_db(exception=None):
 def template_settings():
     limit = app.config['UPLOAD_MAX_BYTES']
     return dict(upload_max_bytes=limit,
+                litterbox_max_bytes=app.config['LITTERBOX_MAX_BYTES'],
                 site_url=SITE_URL,
                 upload_limit_label='1 GB' if limit == MAX_FILE_BYTES else f'{limit / 1_000_000:g} MB',
                 max_text_length=app.config['MAX_TEXT_LENGTH'], banned_exts=sorted(banned_exts),
-                storage_provider='Vercel Blob' if app.config['BLOB_READ_WRITE_TOKEN'] else 'Litterbox')
+                storage_provider='Vercel Blob and Litterbox')
 
 
 def blob_headers():
@@ -138,10 +155,9 @@ def delete_blobs(urls):
 
 def cleanup_expired(db):
     # ponytail: request-driven cleanup leaves idle/orphan objects; schedule cleanup and reconcile the store at scale.
-    rows = query(db, 'SELECT key, type, url, expires FROM shares WHERE expires <= ? ORDER BY expires LIMIT 50',
+    rows = query(db, 'SELECT key, type, url, expires, provider FROM shares WHERE expires <= ? ORDER BY expires LIMIT 50',
                  (time.time(),)).fetchall()
-    urls = [row['url'] for row in rows if row['type'] == 'file'
-            and not (row['url'] or '').startswith('https://litter.catbox.moe/')]
+    urls = [row['url'] for row in rows if row['type'] == 'file' and row['provider'] == 'vercel']
     try:
         if urls:
             delete_blobs(urls)
@@ -222,20 +238,22 @@ def response_headers(response):
 
 def share_details(row):
     return dict(key=row['key'], type=row['type'], name=row['name'], content=row['content'],
+                storageProvider=row['provider'] if row['type'] == 'file' else None,
                 size=row['size'], expires=datetime.fromtimestamp(row['expires'], timezone.utc).isoformat(),
                 page_url=url_for('download_details', key=row['key'], _external=True),
                 link=url_for('download_direct', key=row['key'], _external=True))
 
 
-def save_share(kind, name, size, expires, content=None, url=None):
+def save_share(kind, name, size, expires, content=None, url=None, provider=None):
     db = get_db()
     cleanup_expired(db)
     with transaction(db):
         for _ in range(100):
             key = f'{secrets.randbelow(100_000):05d}'
-            inserted = query(db, '''INSERT INTO shares VALUES (?, ?, ?, ?, ?, ?, ?)
-                                    ON CONFLICT(key) DO NOTHING''',
-                             (key, kind, name, content, url, size, expires))
+            inserted = query(db, '''INSERT INTO shares (key, type, name, content, url, size, expires, provider)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                     ON CONFLICT(key) DO NOTHING''',
+                              (key, kind, name, content, url, size, expires, provider))
             if inserted.rowcount:
                 break
         else:
@@ -303,9 +321,15 @@ def upload():
             return error_response(str(exc), 503)
         return jsonify(success=True, uploads=[shared], errors=[])
 
+    provider = request.form.get('storageProvider', 'vercel')
+    if provider not in {'vercel', 'litterbox'}:
+        return error_response('Choose AlienXFile Storage or Litterbox Large Files.', 400)
     files = request.files.getlist('file')
     if not files or len(files) > 10:
         return error_response('Select between 1 and 10 files per request.', 400)
+    if provider == 'vercel' and not app.config['BLOB_READ_WRITE_TOKEN']:
+        return error_response('AlienXFile Storage is temporarily unavailable. Please try again later.', 503)
+    limit = app.config['UPLOAD_MAX_BYTES'] if provider == 'vercel' else min(app.config['LITTERBOX_MAX_BYTES'], MAX_FILE_BYTES)
     uploads, errors = [], []
     for file in files:
         filename = secure_filename(file.filename or '')
@@ -320,11 +344,14 @@ def upload():
             file.stream.seek(0, 2)
             size = file.stream.tell()
             file.stream.seek(0)
-            if size > app.config['UPLOAD_MAX_BYTES']:
-                errors.append(f'{filename}: File exceeds the {template_settings()["upload_limit_label"]} limit.')
+            if size > limit:
+                message = (f"This file exceeds AlienXFile Storage's {template_settings()['upload_limit_label']} limit. "
+                           'Choose Litterbox Large Files to upload it.' if provider == 'vercel'
+                           else "This file exceeds Litterbox's 1 GB limit.")
+                errors.append(f'{filename}: {message}')
                 continue
             expires = time.time() + expire_seconds[expiry]
-            if app.config['BLOB_READ_WRITE_TOKEN']:
+            if provider == 'vercel':
                 with requests.put(BLOB_API + '/',
                                   params={'pathname': f'shares/{secrets.token_hex(16)}/{filename}'},
                                   data=file.stream if size else b'', headers={
@@ -355,16 +382,26 @@ def upload():
                         r'https://litter\.catbox\.moe/[A-Za-z0-9][A-Za-z0-9._-]*', link
                     ):
                         raise ValueError('Storage provider returned an invalid file link.')
-            uploads.append(save_share('file', filename, size, expires, url=link))
+            uploads.append(save_share('file', filename, size, expires, url=link, provider=provider))
         except (requests.RequestException, ValueError, OSError, sqlite3.Error, psycopg.Error) as exc:
             if stored_blob:
                 try:
                     delete_blobs([stored_blob])
                 except (requests.RequestException, ValueError):
                     logger.warning('An unregistered private upload needs storage cleanup.')
-            logger.warning('Upload failed (%s; upstream status=%s)', type(exc).__name__,
-                           getattr(getattr(exc, 'response', None), 'status_code', None))
-            errors.append(f'{filename}: Upload could not be completed. The storage provider or server may be unavailable.')
+            status = getattr(getattr(exc, 'response', None), 'status_code', None)
+            logger.warning('Upload failed (provider=%s; %s; upstream status=%s)', provider, type(exc).__name__, status)
+            message = 'Upload could not be completed. The storage provider or server may be unavailable.'
+            if provider == 'litterbox':
+                if isinstance(exc, requests.Timeout):
+                    message = 'Litterbox upload timed out. Please try again later.'
+                elif status:
+                    message = f'Litterbox rejected the server upload (HTTP {status}). Please try again later or use AlienXFile Storage for smaller files.'
+                elif isinstance(exc, requests.RequestException):
+                    message = 'Could not reach Litterbox. Please try again later.'
+                else:
+                    message = 'The Litterbox upload could not be completed. Please try again later.'
+            errors.append(f'{filename}: {message}')
     return jsonify(success=bool(uploads), uploads=uploads, errors=errors), 200 if uploads else 400
 
 
@@ -382,8 +419,12 @@ def download_share(key):
         cleanup_expired(db)
         return error_response('This share has expired. Ask the sender to upload it again.', 410)
     if request.endpoint == 'download_direct' and row['type'] == 'file':
-        if (row['url'] or '').startswith('https://litter.catbox.moe/'):
+        if row['provider'] == 'litterbox':
+            if not re.fullmatch(r'https://litter\.catbox\.moe/[A-Za-z0-9][A-Za-z0-9._-]*', row['url'] or ''):
+                return error_response('This file has an invalid storage link. Ask the sender to share it again.', 502)
             return redirect(row['url'])
+        if row['provider'] != 'vercel':
+            return error_response('This file has an unknown storage provider. Ask the sender to share it again.', 502)
         try:
             upstream = requests.get(checked_blob_url(row['url']),
                                     headers={'Authorization': blob_headers()['Authorization'], 'Accept-Encoding': 'identity'},
@@ -411,7 +452,7 @@ def http_error(exc):
     messages = {400: 'The request could not be read. Please try again.',
                 404: 'Page not found. Enter a share code below.',
                 405: 'This request method is not supported.',
-                413: (f'Upload too large. Send one file per request, up to {app.config["UPLOAD_MAX_BYTES"]:,} bytes. Hosting limits may be lower.'
+                413: (f'Upload too large. AlienXFile Storage allows up to {template_settings()["upload_limit_label"]} per file; Litterbox up to 1 GB. Hosting limits may be lower.'
                       if request.path == '/upload' else 'The submitted code is too long. Enter a 5-digit code.'),
                 500: 'Something went wrong. Please try again later.'}
     body, status = error_response(messages.get(exc.code, exc.description), exc.code)

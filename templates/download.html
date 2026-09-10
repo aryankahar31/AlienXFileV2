@@ -205,10 +205,15 @@
                 {% if share.type == 'file' %}
                     <dt>File size</dt>
                     <dd>{{ share.size|filesizeformat }} ({{ share.size }} bytes)</dd>
+                    <dt>Storage</dt>
+                    <dd>{{ 'Litterbox' if share.storageProvider == 'litterbox' else 'AlienXFile Storage (Vercel Blob)' }}</dd>
                 {% endif %}
             </dl>
 
             {% if share.type == 'file' %}
+                {% if share.storageProvider == 'litterbox' %}
+                    <p class="privacy">This file is stored temporarily by Litterbox, a third-party provider. Availability may end before the share expires.</p>
+                {% endif %}
                 <a class="button" href="{{ share.link }}">Download</a>
             {% elif share.type == 'text' %}
                 <h2 id="textHeading">Shared text</h2>
@@ -241,7 +246,7 @@
 
         <section class="about-section" aria-labelledby="aboutHeading">
             <h2 id="aboutHeading">About AlienXFile V2</h2>
-            <p class="help">Temporary file and text sharing. Files up to <span title="{{ upload_max_bytes }} bytes">{{ upload_limit_label }}</span>; text up to {{ max_text_length }} characters.</p>
+            <p class="help">Temporary file and text sharing. AlienXFile Storage (Vercel Blob): files up to <span title="{{ upload_max_bytes }} bytes">{{ upload_limit_label }}</span>. Litterbox: temporary third-party storage for larger files, up to approximately 1 GB. Hosting or the provider may reject large uploads. Text up to {{ max_text_length }} characters.</p>
             <p class="privacy">Keep the code and link private: anyone with either can access the share until it expires. A five-digit code is not encryption. Do not share passwords, credentials, or other sensitive information.</p>
         </section>
     </main>

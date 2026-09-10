@@ -658,6 +658,24 @@
         #fileInputLabel span { max-width: 100%; }
         .copy-fallback { width: 100%; min-height: 44px; }
         .notice { color: var(--text-muted); font-size: 14px; margin: 12px 0; }
+        .storage-options { margin-bottom: 20px; }
+        .storage-options legend { font-weight: 600; margin-bottom: 8px; }
+        .storage-option {
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+            padding: 12px;
+            margin-bottom: 8px;
+            border: 1px solid #74849A;
+            border-radius: 12px;
+            background: rgba(255, 255, 255, 0.15);
+            cursor: pointer;
+        }
+        .storage-option:has(input:checked) { background: #E7EFF9; border-color: var(--link-color); }
+        .storage-option input { margin-top: 6px; accent-color: var(--link-color); flex-shrink: 0; }
+        .storage-option small { display: block; color: var(--text-muted); }
+        .storage-badge { display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 12px; background: #D7E6F5; }
+        #storageWarning { color: var(--warning-color); }
         #selectedFiles { padding-left: 20px; margin-top: 12px; }
         #selectedFiles:empty { display: none; }
         #uploadStatus { margin-top: 16px; }
@@ -694,6 +712,7 @@
         <noscript><p class="notice">JavaScript is required for uploads, progress, and share results. Enable it and reload this page. The download page still works without JavaScript.</p></noscript>
         <form id="uploadForm" action="/upload" method="post" enctype="multipart/form-data"
               data-max-bytes="{{ upload_max_bytes }}" data-limit-label="{{ upload_limit_label }}"
+              data-litterbox-max-bytes="{{ litterbox_max_bytes }}"
               data-max-text-length="{{ max_text_length }}">
             <fieldset id="uploadControls" disabled>
             <legend class="visually-hidden">Share files or text</legend>
@@ -718,13 +737,27 @@
             </div>
 
             <div id="fileInputContainer">
+                <fieldset id="storageOptions" class="storage-options" aria-describedby="storageWarning storageHostingNote">
+                    <legend>Storage</legend>
+                    <label class="storage-option">
+                        <input type="radio" name="storageProvider" value="vercel" checked>
+                        <span><strong>AlienXFile Storage</strong> <span class="storage-badge">Recommended</span>
+                            <small>Vercel Blob &middot; up to {{ upload_limit_label }} per file</small></span>
+                    </label>
+                    <label class="storage-option">
+                        <input type="radio" name="storageProvider" value="litterbox">
+                        <span><strong>Litterbox</strong> <span class="storage-badge">Large Files</span>
+                            <small>Temporary third-party storage for files above the normal limit; up to approximately 1 GB per file.</small></span>
+                    </label>
+                    <p class="notice" id="storageWarning" role="status" hidden>Large files are stored temporarily by a third-party provider. Do not upload sensitive files.</p>
+                    <p class="notice" id="storageHostingNote">Hosting limits or the storage provider may reject large files, even below the selected limit.</p>
+                </fieldset>
                 <label for="fileInput" id="fileInputLabel">
                     <span id="fileInputText">Choose files or drag here</span>
                     <small>Choose multiple files; each uploads separately.</small>
                 </label>
                 <input type="file" name="file" id="fileInput" multiple required aria-describedby="fileLimits" />
-                <p class="notice" id="fileLimits">Current limit: {{ upload_limit_label }} per file ({{ upload_max_bytes }} bytes).
-                    The app ceiling is 1 GB (1,000,000,000 bytes); deployment settings or hosting may cap uploads lower.</p>
+                <p class="notice" id="fileLimits" aria-live="polite">AlienXFile Storage: up to {{ upload_limit_label }} per file ({{ upload_max_bytes }} bytes).</p>
                 <p class="notice">Blocked extensions: {{ banned_exts | join(', ') }}.</p>
                 <ul id="selectedFiles" aria-label="Selected files"></ul>
             </div>
@@ -760,7 +793,7 @@
             </div>
 
             <p>AlienXFile, also known as AlienXFile V2, lets you share PDFs, documents, images and text. Choose a file or paste text, select an expiry, and send the generated code or link. Recipients can open the link or enter the code on the download page.</p>
-            <p>Files are stored with {{ storage_provider }}. Choose share expiration from 1 hour to 3 days, and keep a backup of anything important.</p>
+            <p>File storage options use {{ storage_provider }}. AlienXFile Storage (Vercel Blob) is recommended for files up to {{ upload_limit_label }}. For larger files, choose Litterbox temporary third-party storage, up to approximately 1 GB. Hosting or the provider may reject large uploads. Choose share expiration from 1 hour to 3 days, and keep a backup of anything important.</p>
 
             <div class="features-grid">
                 <div class="feature-card">
@@ -770,7 +803,7 @@
                         </svg>
                     </div>
                     <h4>Easy Upload</h4>
-                    <p>Upload files up to {{ upload_limit_label }} each or share text. Hosting limits may be lower.</p>
+                    <p>Share text or files up to {{ upload_limit_label }} with AlienXFile Storage. Litterbox offers temporary storage up to approximately 1 GB; hosting and provider limits still apply.</p>
                 </div>
                 <div class="feature-card">
                     <div class="feature-icon">
