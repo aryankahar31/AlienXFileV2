@@ -20,6 +20,7 @@ from werkzeug.exceptions import HTTPException
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
+SITE_URL = 'https://alienxfilev2.onrender.com/'
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,7 @@ app.config.update(
     DATABASE=os.environ.get('ALIENX_DATABASE', str(Path(__file__).with_name('shares.sqlite3'))),
     DATABASE_URL=os.environ.get('DATABASE_URL'),
     BLOB_READ_WRITE_TOKEN=os.environ.get('BLOB_READ_WRITE_TOKEN', '').strip(),
+    INDEXNOW_KEY=os.environ.get('INDEXNOW_KEY', ''),
     UPLOAD_MAX_BYTES=upload_max_bytes,
     MAX_CONTENT_LENGTH=upload_max_bytes + 1_000_000,
     MAX_FORM_MEMORY_SIZE=500_000,
@@ -102,6 +104,7 @@ def close_db(exception=None):
 def template_settings():
     limit = app.config['UPLOAD_MAX_BYTES']
     return dict(upload_max_bytes=limit,
+                site_url=SITE_URL,
                 upload_limit_label='1 GB' if limit == MAX_FILE_BYTES else f'{limit / 1_000_000:g} MB',
                 max_text_length=app.config['MAX_TEXT_LENGTH'], banned_exts=sorted(banned_exts),
                 storage_provider='Vercel Blob' if app.config['BLOB_READ_WRITE_TOKEN'] else 'Litterbox')
@@ -211,6 +214,9 @@ def response_headers(response):
     )
     if request.endpoint != 'static':
         response.headers['Cache-Control'] = 'no-store'
+    # Let crawlers read noindex; robots.txt must not block these private routes.
+    if request.endpoint not in {'index', 'robots', 'sitemap', 'static'} or response.status_code >= 400:
+        response.headers['X-Robots-Tag'] = 'noindex, nofollow, noarchive'
     return response
 
 
@@ -243,6 +249,24 @@ def save_share(kind, name, size, expires, content=None, url=None):
 @app.route('/')
 def index():
     return render_template('index.html')
+
+
+@app.route('/robots.txt')
+def robots():
+    return Response(f'User-agent: *\nAllow: /\n\nSitemap: {SITE_URL}sitemap.xml\n', mimetype='text/plain')
+
+
+@app.route('/sitemap.xml')
+def sitemap():
+    return Response('<?xml version="1.0" encoding="UTF-8"?>\n'
+                    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+                    f'<url><loc>{SITE_URL}</loc></url></urlset>', mimetype='application/xml')
+
+
+@app.route('/indexnow-key.txt')
+def indexnow_key():
+    key = app.config['INDEXNOW_KEY']
+    return Response(key, status=200 if key else 404, mimetype='text/plain')
 
 
 @app.route('/download', methods=['GET', 'POST'])

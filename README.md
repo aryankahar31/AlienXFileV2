@@ -1,5 +1,7 @@
 # AlienXFile V2
 
+**Live website: [AlienXFile](https://alienxfilev2.onrender.com/)**
+
 Temporary file and text sharing built with Flask, PostgreSQL (or SQLite for local/PythonAnywhere use), and private [Vercel Blob](https://vercel.com/docs/vercel-blob) storage. The responsive pages use HTML, CSS, and JavaScript, with no frontend build step. The original Litterbox integration remains available when no Blob token is configured.
 
 - Share files or text using a five-digit code, including leading zeros, or a share link.
@@ -170,6 +172,17 @@ SQLite's short write transactions suit a small site, but writes serialize and ca
 - Some executable/script filename extensions are blocked, but the app does not scan file contents for malware. Treat downloaded files as untrusted.
 - QR codes encode the details URL and use the same expiration checks and lookup rate limits. Anyone who scans one can access the share, just like anyone holding its URL.
 - Global response headers include `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, and a Content Security Policy; non-static responses use `Cache-Control: no-store`. These do not make public share codes secret. Never place database credentials or access tokens in public/global headers, share contents, or source files.
+
+## Search Visibility
+
+The homepage is the search landing page for **AlienXFile**. It includes a branded title and heading, description, canonical HTTPS URL, social metadata, and WebSite structured data. `SITE_URL` in `flask_app.py` is the trusted canonical address; update it if the primary domain changes.
+
+- `/robots.txt` allows crawling and points to `/sitemap.xml`, which contains only the homepage.
+- Share pages, code lookup, uploads, downloads, QR images and errors send `X-Robots-Tag: noindex, nofollow, noarchive`. Do not add share URLs to sitemaps or search submissions. Do not block these routes in robots.txt: crawlers need to read their noindex headers. This is a cooperative search exclusion, not an access-control guarantee.
+- Optional `INDEXNOW_KEY` enables `/indexnow-key.txt` for homepage-only IndexNow notifications. Keep the configured key out of source control; the verification file itself must be publicly accessible. Accepted notifications do not guarantee indexing or rankings.
+- Verify the `https://alienxfilev2.onrender.com/` URL-prefix property in Google Search Console, submit `https://alienxfilev2.onrender.com/sitemap.xml`, and request indexing for the homepage. Bing Webmaster Tools can also track crawl/indexing issues. These account verification steps require the site owner's login.
+- Search engines, including Brave, decide when to crawl, index and rank the site. A new brand can take time to displace spelling corrections. Use the same name and link on genuine profiles; do not buy spam links or create keyword-stuffed pages.
+- Render Free can sleep and return a wake-up page. Check what search crawlers receive; if this repeatedly prevents crawling, an always-available landing page or hosting upgrade is a separate decision, not a reason to bypass free-tier sleep restrictions.
 
 ## Contributing
 

@@ -3,7 +3,24 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AlienX Instant Share</title>
+    {% set page_title = 'AlienXFile - Temporary File & Text Sharing' %}
+    {% set description = 'Share files and text with AlienXFile using five-digit codes and links. No account needed. Choose an expiration from one hour to three days.' %}
+    <title>{{ page_title }}</title>
+    <meta name="description" content="{{ description }}">
+    <meta name="robots" content="index, follow">
+    <link rel="canonical" href="{{ site_url }}">
+    <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}" type="image/svg+xml">
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="AlienXFile">
+    <meta property="og:title" content="{{ page_title }}">
+    <meta property="og:description" content="{{ description }}">
+    <meta property="og:url" content="{{ site_url }}">
+    <meta name="twitter:card" content="summary">
+    <meta name="twitter:title" content="{{ page_title }}">
+    <meta name="twitter:description" content="{{ description }}">
+    <script type="application/ld+json">
+    {{ {'@context': 'https://schema.org', '@type': 'WebSite', 'name': 'AlienXFile', 'alternateName': 'AlienXFile V2', 'url': site_url, 'description': description}|tojson }}
+    </script>
     <script src="{{ url_for('static', filename='upload.js') }}" defer></script>
     <style>
         :root {
@@ -98,10 +115,12 @@
         .card h1 {
             text-align: center;
             font-weight: 600;
-            margin-bottom: 32px;
+            margin-bottom: 12px;
             font-size: 28px;
             letter-spacing: -0.5px;
         }
+
+        .intro { text-align: center; color: var(--text-muted); margin-bottom: 24px; }
 
         /* Segmented Control for Mode Switch */
         .mode-switch {
@@ -480,7 +499,7 @@
             fill: white;
         }
 
-        .about-section h3 {
+        .about-section h2 {
             font-size: 20px;
             font-weight: 600;
             color: var(--text-color);
@@ -670,7 +689,8 @@
 <body>
 
     <main class="card">
-        <h1>AlienX Instant Share</h1>
+        <h1>AlienXFile</h1>
+        <p class="intro">Temporary file and text sharing. Share a five-digit code or link, with no account needed.</p>
         <noscript><p class="notice">JavaScript is required for uploads, progress, and share results. Enable it and reload this page. The download page still works without JavaScript.</p></noscript>
         <form id="uploadForm" action="/upload" method="post" enctype="multipart/form-data"
               data-max-bytes="{{ upload_max_bytes }}" data-limit-label="{{ upload_limit_label }}"
@@ -736,10 +756,11 @@
                         <path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/>
                     </svg>
                 </div>
-                <h3>About AlienXFile V2</h3>
+                <h2>About AlienXFile</h2>
             </div>
 
-            <p>AlienXFile V2 is a temporary file/text sharing platform built with Python and Flask, using {{ storage_provider }} for file storage with share expiration options from 1 hour to 3 days.</p>
+            <p>AlienXFile, also known as AlienXFile V2, lets you share PDFs, documents, images and text. Choose a file or paste text, select an expiry, and send the generated code or link. Recipients can open the link or enter the code on the download page.</p>
+            <p>Files are stored with {{ storage_provider }}. Choose share expiration from 1 hour to 3 days, and keep a backup of anything important.</p>
 
             <div class="features-grid">
                 <div class="feature-card">

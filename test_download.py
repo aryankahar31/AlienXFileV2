@@ -1,4 +1,6 @@
 import os
+import json
+import re
 import runpy
 import sqlite3
 import subprocess
@@ -45,6 +47,7 @@ class DownloadTest(unittest.TestCase):
         contexts = ExitStack()
         self.addCleanup(contexts.close)
         contexts.enter_context(patch.dict(app.config, TESTING=True, DATABASE=self.database, DATABASE_URL=None, BLOB_READ_WRITE_TOKEN='',
+                                     INDEXNOW_KEY='',
                                      UPLOAD_RATE_LIMIT=1000, LOOKUP_RATE_LIMIT=1000,
                                      RATE_WINDOW_SECONDS=60, TRUST_PYTHONANYWHERE_PROXY=False, TRUST_RENDER_PROXY=False))
         self.now = 1_800_000_000
@@ -106,7 +109,8 @@ class DownloadTest(unittest.TestCase):
                 self.assertIn('&lt;script&gt;alert(', html)
                 self.assertIn('&lt;/script&gt;', html)
                 self.assertIn('href="http://localhost/share/00007"', html)
-                self.assertIn('<title>AlienX Download</title>', html)
+                self.assertIn('<title>AlienXFile - Download by Code</title>', html)
+                self.assertIn('noindex', page.headers['X-Robots-Tag'])
                 self.assertIn('id="textContent"', html)
                 self.assertEqual(page.headers['Cache-Control'], 'no-store')
                 self.assertEqual(page.headers['X-Content-Type-Options'], 'nosniff')
@@ -222,6 +226,7 @@ class DownloadTest(unittest.TestCase):
         direct = self.client.get('/download/00042')
         self.assertEqual(direct.status_code, 302)
         self.assertEqual(direct.location, FILE_URL)
+        self.assertIn('noindex', direct.headers['X-Robots-Tag'])
         self.post.assert_called_once()
 
     def test_invalid_provider_links_do_not_create_shares(self):
@@ -405,6 +410,7 @@ with patch('flask_app.time.time', return_value=float(sys.argv[2])), patch(
             response = self.client.get(path)
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.mimetype, 'image/svg+xml')
+            self.assertIn('noindex', response.headers['X-Robots-Tag'])
             self.assertEqual(make.call_args.args[0], share['page_url'])
         root = ElementTree.fromstring(response.data)
         self.assertEqual(root.tag, '{http://www.w3.org/2000/svg}svg')
@@ -558,6 +564,7 @@ with patch('flask_app.time.time', return_value=float(sys.argv[2])), patch(
             self.assertEqual(downloaded.headers['Content-Length'], '9')
             self.assertIn('attachment;', downloaded.headers['Content-Disposition'])
             self.assertEqual(downloaded.headers['Cache-Control'], 'no-store')
+            self.assertIn('noindex', downloaded.headers['X-Robots-Tag'])
             self.assertEqual(get.call_args.args[0], url)
             self.assertEqual(get.call_args.kwargs['headers']['Authorization'], 'Bearer ' + token)
             self.assertFalse(get.call_args.kwargs['allow_redirects'])
@@ -612,6 +619,59 @@ with patch('flask_app.time.time', return_value=float(sys.argv[2])), patch(
             self.assertEqual(response.status_code, 400)
             self.assertFalse(response.get_json()['success'])
             self.assertEqual(self.post.call_args.kwargs['json'], {'urls': [url]})
+
+    def test_homepage_brand_and_metadata_use_trusted_canonical(self):
+        with patch('flask_app.get_db', side_effect=AssertionError('Public pages must not need a database')):
+            response = self.client.get('/', base_url='https://untrusted.example')
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn('X-Robots-Tag', response.headers)
+        html = response.get_data(as_text=True)
+        tags = Markup(html).tags
+        self.assertIn('<title>AlienXFile - Temporary File &amp; Text Sharing</title>', html)
+        self.assertIn('<h1>AlienXFile</h1>', html)
+        canonical = next(attrs for tag, attrs in tags if tag == 'link' and attrs.get('rel') == 'canonical')
+        self.assertEqual(canonical['href'], 'https://alienxfilev2.onrender.com/')
+        metadata = {attrs.get('name') or attrs.get('property'): attrs.get('content')
+                    for tag, attrs in tags if tag == 'meta'}
+        self.assertIn('AlienXFile', metadata['description'])
+        self.assertEqual(metadata['og:url'], canonical['href'])
+        self.assertEqual(metadata['robots'], 'index, follow')
+        schema = json.loads(re.search(r'<script type="application/ld\+json">\s*(.*?)\s*</script>', html, re.S)[1])
+        self.assertEqual(schema['@type'], 'WebSite')
+        self.assertEqual(schema['name'], 'AlienXFile')
+        self.assertEqual(schema['url'], canonical['href'])
+
+    def test_discovery_routes_include_only_homepage(self):
+        with patch('flask_app.get_db', side_effect=AssertionError('Discovery must not enumerate shares')):
+            robots = self.client.get('/robots.txt')
+            sitemap = self.client.get('/sitemap.xml')
+            icon = self.client.get('/static/favicon.svg')
+            self.assertEqual(self.client.get('/indexnow-key.txt').status_code, 404)
+            with patch.dict(app.config, INDEXNOW_KEY='a' * 32):
+                key = self.client.get('/indexnow-key.txt')
+        self.assertEqual(robots.status_code, 200)
+        self.assertEqual(robots.mimetype, 'text/plain')
+        self.assertIn(b'Sitemap: https://alienxfilev2.onrender.com/sitemap.xml', robots.data)
+        self.assertNotIn(b'Disallow:', robots.data)
+        self.assertEqual(sitemap.status_code, 200)
+        self.assertEqual(sitemap.mimetype, 'application/xml')
+        root = ElementTree.fromstring(sitemap.data)
+        locations = root.findall('{http://www.sitemaps.org/schemas/sitemap/0.9}url/{http://www.sitemaps.org/schemas/sitemap/0.9}loc')
+        self.assertEqual([location.text for location in locations], ['https://alienxfilev2.onrender.com/'])
+        self.assertEqual(icon.status_code, 200)
+        icon.close()
+        self.assertEqual(key.status_code, 200)
+        self.assertEqual(key.data, b'a' * 32)
+        self.assertIn('noindex', key.headers['X-Robots-Tag'])
+
+    def test_lookup_upload_and_errors_are_not_indexable(self):
+        for method, path in (('GET', '/download'), ('GET', '/share/99999'), ('GET', '/qr/99999'),
+                             ('GET', '/download/99999'), ('GET', '/missing'), ('GET', '/static/missing'),
+                             ('POST', '/'), ('POST', '/upload'), ('POST', '/download')):
+            with self.subTest(method=method, path=path):
+                response = self.client.open(path, method=method, data={'key': '99999'})
+                self.assertIn('noindex', response.headers['X-Robots-Tag'])
+                self.assertIn('nofollow', response.headers['X-Robots-Tag'])
 
     def test_error_pages_offer_explicit_download_form(self):
         for method, path, status in (('GET', '/missing', 404), ('GET', '/share/99999', 404),
