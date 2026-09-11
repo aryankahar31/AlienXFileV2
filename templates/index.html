@@ -22,7 +22,7 @@
     {{ {'@context': 'https://schema.org', '@type': 'WebSite', 'name': 'AlienXFile', 'alternateName': 'AlienXFile V2', 'url': site_url, 'description': description}|tojson }}
     </script>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-    <script src="{{ url_for('static', filename='upload.js') }}?v=4" defer></script>
+    <script src="{{ url_for('static', filename='upload.js') }}?v=5" defer></script>
 </head>
 <body>
 
@@ -45,8 +45,8 @@
 
     <main class="card">
         <h1>AlienXFile</h1>
-        <p class="intro">Temporary file and text sharing. Share a five-digit code or link, with no account needed.</p>
-        <noscript><p class="notice">JavaScript is required for uploads, progress, and share results. Enable it and reload this page.</p></noscript>
+        <p class="intro">Share files or text with a five-digit code. No account needed.</p>
+        <noscript><p class="notice">JavaScript is required for uploads. Enable it and reload.</p></noscript>
         <form id="uploadForm" action="/upload" method="post" enctype="multipart/form-data"
               data-max-bytes="{{ upload_max_bytes }}" data-limit-label="{{ upload_limit_label }}"
               data-litterbox-max-bytes="{{ litterbox_max_bytes }}"
@@ -77,57 +77,88 @@
                     <legend>Storage</legend>
                     <label class="storage-option">
                         <input type="radio" name="storageProvider" value="vercel" checked>
-                        <span><strong>AlienXFile Storage</strong> <span class="storage-badge">Recommended</span>
-                            <small>Vercel Blob &middot; up to {{ upload_limit_label }} per file</small></span>
+                        <span>
+                            <strong>AlienXFile Storage</strong> <span class="storage-badge storage-badge--rec">Recommended</span>
+                            <small>Up to {{ upload_limit_label }} per file. Best for normal files.</small>
+                        </span>
                     </label>
                     <label class="storage-option">
                         <input type="radio" name="storageProvider" value="litterbox">
-                        <span><strong>Litterbox</strong> <span class="storage-badge">Large Files</span>
-                            <small>Temporary third-party storage for files above the normal limit; up to approximately 1 GB per file.</small></span>
+                        <span>
+                            <strong>Litterbox</strong> <span class="storage-badge storage-badge--large">Large Files</span>
+                            <small>Up to ~1 GB. Third-party temporary storage.</small>
+                        </span>
                     </label>
-                    <p class="notice" id="storageWarning" role="status" hidden>Large files are stored temporarily by a third-party provider. Do not upload sensitive files.</p>
-                    <p class="notice" id="storageHostingNote">Hosting limits or the storage provider may reject large files, even below the selected limit.</p>
+                    <p class="notice" id="storageWarning" role="status" hidden>Third-party storage. Avoid sensitive files.</p>
+                    <p class="notice" id="storageHostingNote">Provider may reject large files even below the limit.</p>
                 </fieldset>
                 <label for="fileInput" id="fileInputLabel">
-                    <span id="fileInputText">Choose files or drag here</span>
-                    <small>Choose multiple files; each uploads separately.</small>
+                    <span id="fileInputText">Drop files here or click to browse</span>
+                    <small>Each file uploads separately.</small>
                 </label>
                 <input type="file" name="file" id="fileInput" multiple required aria-describedby="fileLimits" />
-                <p class="notice" id="fileLimits" aria-live="polite">AlienXFile Storage: up to {{ upload_limit_label }} per file ({{ upload_max_bytes }} bytes).</p>
-                <p class="notice">Blocked extensions: {{ banned_exts | join(', ') }}.</p>
+                <p class="notice" id="fileLimits" aria-live="polite">Up to {{ upload_limit_label }} per file ({{ upload_max_bytes }} bytes).</p>
+                <p class="notice">Blocked: {{ banned_exts | join(', ') }}.</p>
                 <ul id="selectedFiles" aria-label="Selected files"></ul>
             </div>
 
             <div id="textInputContainer" hidden>
                 <label for="textInput">Text to share</label>
-                <textarea name="text" id="textInput" placeholder="Enter text to share..." disabled aria-describedby="textLimit"></textarea>
-                <p class="notice" id="textLimit">Maximum {{ max_text_length }} characters.</p>
+                <textarea name="text" id="textInput" placeholder="Paste or type text..." disabled aria-describedby="textLimit"></textarea>
+                <p class="notice" id="textLimit">Max {{ max_text_length }} characters.</p>
             </div>
 
             <button type="submit">Share Now</button>
             </fieldset>
-            <button type="button" id="cancelUpload" hidden>Cancel Uploads</button>
-            <p id="cancelNotice" class="notice" hidden>Cancel stops this browser's request and remaining queue. The server might already finish storing the current item.</p>
+            <button type="button" id="cancelUpload" hidden>Cancel</button>
+            <p id="cancelNotice" class="notice" hidden>Cancel stops this request. Server may already be storing the file.</p>
         </form>
 
         <p id="uploadStatus" role="status" aria-live="polite" aria-atomic="true">Ready to share.</p>
-        <progress id="uploadProgress" max="100" value="0" aria-label="Current item: browser to app upload" hidden></progress>
-        <p class="notice">Temporary sharing, not a backup. Anyone with a five-digit code or link can access the content. Codes are not passwords or encryption. Avoid sensitive content; files are sent to a third-party storage provider. Expiration cannot recall downloaded copies, and availability may end earlier.</p>
+        <progress id="uploadProgress" max="100" value="0" aria-label="Upload progress" hidden></progress>
+        <p class="notice">Temporary sharing, not a backup. Anyone with a code or link can access the content until it expires.</p>
         <section id="result" aria-label="Upload results" hidden></section>
 
-        <hr>
-        <a href="/download" class="download-link">Go to Download Page</a>
+        <hr class="divider">
+        <a href="/download" class="download-cta">
+            Have a code? Download a file
+            <small>Enter a five-digit code to retrieve shared content.</small>
+        </a>
 
         <div class="about-section">
-            <div class="about-header">
-                <div class="about-icon">
-                    <svg viewBox="0 0 24 24"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/></svg>
+            <p class="about-title">About AlienXFile</p>
+
+            <div class="how-grid">
+                <div class="how-step">
+                    <div class="how-step-num">1</div>
+                    <p>Choose file or text</p>
                 </div>
-                <h2>About AlienXFile</h2>
+                <div class="how-step">
+                    <div class="how-step-num">2</div>
+                    <p>Select expiration</p>
+                </div>
+                <div class="how-step">
+                    <div class="how-step-num">3</div>
+                    <p>Share it</p>
+                </div>
+                <div class="how-step">
+                    <div class="how-step-num">4</div>
+                    <p>Send the code</p>
+                </div>
             </div>
 
-            <p>AlienXFile, also known as AlienXFile V2, lets you share PDFs, documents, images and text. Choose a file or paste text, select an expiry, and send the generated code or link. Recipients can open the link or enter the code on the download page.</p>
-            <p>File storage options use {{ storage_provider }}. AlienXFile Storage (Vercel Blob) is recommended for files up to {{ upload_limit_label }}. For larger files, choose Litterbox temporary third-party storage, up to approximately 1 GB. Hosting or the provider may reject large uploads. Choose share expiration from 1 hour to 3 days, and keep a backup of anything important.</p>
+            <div class="about-cards">
+                <div class="about-card">
+                    <h4>Storage</h4>
+                    <p>AlienXFile Storage for normal files (up to {{ upload_limit_label }}). Litterbox for larger files (up to ~1 GB, third-party).</p>
+                </div>
+                <div class="about-card">
+                    <h4>Expiration</h4>
+                    <p>Files and text expire automatically. Choose 1 hour to 3 days. Keep your own backup.</p>
+                </div>
+            </div>
+
+            <p class="about-footer">Five-digit codes are not encryption. Avoid sharing sensitive content.</p>
 
             <div class="features-grid">
                 <div class="feature-card">
@@ -135,38 +166,36 @@
                         <svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
                     </div>
                     <h4>Easy Upload</h4>
-                    <p>Share text or files up to {{ upload_limit_label }} with AlienXFile Storage. Litterbox offers temporary storage up to approximately 1 GB.</p>
+                    <p>Drag, drop, or click. Files up to {{ upload_limit_label }}.</p>
                 </div>
                 <div class="feature-card">
                     <div class="feature-icon">
                         <svg viewBox="0 0 24 24"><path d="M15.67 4H14V2h-4v2H8.33C7.6 4 7 4.6 7 5.33v15.33C7 21.4 7.6 22 8.33 22h7.33c.74 0 1.34-.6 1.34-1.33V5.33C17 4.6 16.4 4 15.67 4z"/></svg>
                     </div>
                     <h4>Five-Digit Codes</h4>
-                    <p>Share a code or link for easy access, not private or encrypted access.</p>
+                    <p>Share a short code. Easy to remember, easy to type.</p>
                 </div>
                 <div class="feature-card">
                     <div class="feature-icon">
                         <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
                     </div>
-                    <h4>Temporary Storage</h4>
-                    <p>Choose an expiry and keep your own backup. Downloaded copies may remain.</p>
+                    <h4>Auto Expiry</h4>
+                    <p>Content disappears after your chosen duration.</p>
                 </div>
                 <div class="feature-card">
                     <div class="feature-icon">
                         <svg viewBox="0 0 24 24"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>
                     </div>
-                    <h4>Modern UI</h4>
-                    <p>Responsive design with bold, energetic neo-brutalist interface</p>
+                    <h4>No Account</h4>
+                    <p>Just share and go. No sign-up required.</p>
                 </div>
             </div>
 
             <div class="tech-stack">
                 <span class="tech-badge">Python</span>
                 <span class="tech-badge">Flask</span>
-                <span class="tech-badge">{{ storage_provider }}</span>
-                <span class="tech-badge">HTML5</span>
-                <span class="tech-badge">CSS3</span>
-                <span class="tech-badge">JavaScript</span>
+                <span class="tech-badge">Vercel Blob</span>
+                <span class="tech-badge">Litterbox</span>
             </div>
 
             <div class="connect-section">
@@ -182,7 +211,7 @@
                     </a>
                     <a href="https://x.com/aryankahar31" target="_blank" class="social-link">
                         <span class="social-icon"><svg viewBox="0 0 24 24"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg></span>
-                        X (Twitter)
+                        X
                     </a>
                     <a href="mailto:aryankahar3000@gmail.com" class="social-link">
                         <span class="social-icon"><svg viewBox="0 0 24 24"><path d="M20 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg></span>
