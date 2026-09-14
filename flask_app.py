@@ -493,6 +493,10 @@ def upload_folder():
     expires = time.time() + expire_seconds[expiry]
     file_list = []
     blobs_to_clean = []
+    vercel_limit = app.config['UPLOAD_MAX_BYTES']
+    litterbox_limit = min(app.config['LITTERBOX_MAX_BYTES'], MAX_FILE_BYTES)
+    proxy_url = app.config.get('LITTERBOX_PROXY_URL', '')
+    proxy_secret = app.config.get('LITTERBOX_PROXY_SECRET', '')
     for file in files:
         filename = secure_filename(file.filename or '')
         if not filename or len(filename) > 255:
@@ -503,24 +507,54 @@ def upload_folder():
             file.stream.seek(0, 2)
             size = file.stream.tell()
             file.stream.seek(0)
-            if size > app.config['UPLOAD_MAX_BYTES']:
+            if size > litterbox_limit:
                 continue
-            with requests.put(BLOB_API + '/',
-                              params={'pathname': f'shares/{secrets.token_hex(16)}/{filename}'},
-                              data=file.stream if size else b'', headers={
-                                  **blob_headers(), 'Content-Length': str(size),
-                                  'Content-Type': 'application/octet-stream',
-                                  'x-content-type': 'application/octet-stream',
-                                  'x-vercel-blob-access': 'private', 'x-add-random-suffix': '0',
-                                  'x-allow-overwrite': '0', 'x-cache-control-max-age': '60',
-                              }, timeout=(10, 180), allow_redirects=False) as response:
-                response.raise_for_status()
-                result = response.json()
-                if not 200 <= response.status_code < 300 or not isinstance(result, dict):
-                    raise ValueError('Invalid storage response.')
-                link = checked_blob_url(result.get('url'))
-                blobs_to_clean.append(link)
-                file_list.append({'name': filename, 'url': link, 'size': size})
+            if size <= vercel_limit:
+                with requests.put(BLOB_API + '/',
+                                  params={'pathname': f'shares/{secrets.token_hex(16)}/{filename}'},
+                                  data=file.stream if size else b'', headers={
+                                      **blob_headers(), 'Content-Length': str(size),
+                                      'Content-Type': 'application/octet-stream',
+                                      'x-content-type': 'application/octet-stream',
+                                      'x-vercel-blob-access': 'private', 'x-add-random-suffix': '0',
+                                      'x-allow-overwrite': '0', 'x-cache-control-max-age': '60',
+                                  }, timeout=(10, 180), allow_redirects=False) as response:
+                    response.raise_for_status()
+                    result = response.json()
+                    if not 200 <= response.status_code < 300 or not isinstance(result, dict):
+                        raise ValueError('Invalid storage response.')
+                    link = checked_blob_url(result.get('url'))
+                    blobs_to_clean.append(link)
+                    file_list.append({'name': filename, 'url': link, 'size': size, 'provider': 'vercel'})
+            else:
+                if proxy_url:
+                    body = MultipartEncoder(fields={
+                        'time': expiry,
+                        'fileToUpload': (filename, file.stream, 'application/octet-stream'),
+                    })
+                    with requests.post(
+                        proxy_url.rstrip('/') + '/proxy/litterbox', data=body,
+                        headers={'Content-Type': body.content_type, 'X-Proxy-Secret': proxy_secret},
+                        timeout=(10, 180), allow_redirects=False,
+                    ) as response:
+                        if response.status_code != 200:
+                            raise ValueError(f'Proxy error (HTTP {response.status_code}).')
+                        result = response.json()
+                        link = result.get('url', '')
+                else:
+                    body = MultipartEncoder(fields={
+                        'reqtype': 'fileupload', 'time': expiry,
+                        'fileToUpload': (filename, file.stream, 'application/octet-stream'),
+                    })
+                    with requests.post(
+                        'https://litterbox.catbox.moe/resources/internals/api.php', data=body,
+                        headers={'Content-Type': body.content_type}, timeout=(10, 180), allow_redirects=False,
+                    ) as response:
+                        response.raise_for_status()
+                        link = response.text.strip()
+                if not re.fullmatch(r'https://litter\.catbox\.moe/[A-Za-z0-9][A-Za-z0-9._-]*', link):
+                    raise ValueError('Invalid storage link.')
+                file_list.append({'name': filename, 'url': link, 'size': size, 'provider': 'litterbox'})
         except (requests.RequestException, ValueError, OSError):
             continue
     if not file_list:
@@ -682,15 +716,21 @@ def download_folder_file(key, index):
     if index < 0 or index >= len(files):
         return error_response('Invalid file index.', 404)
     file_info = files[index]
+    provider = file_info.get('provider', 'vercel')
     try:
-        resp = requests.get(file_info['url'],
-                            headers={'Authorization': blob_headers()['Authorization'], 'Accept-Encoding': 'identity'},
-                            stream=True, timeout=(10, 60), allow_redirects=False)
+        if provider == 'litterbox':
+            resp = requests.get(file_info['url'], timeout=(10, 60), allow_redirects=False)
+        else:
+            resp = requests.get(file_info['url'],
+                                headers={'Authorization': blob_headers()['Authorization'], 'Accept-Encoding': 'identity'},
+                                stream=True, timeout=(10, 60), allow_redirects=False)
     except (requests.RequestException, ValueError):
         return error_response('File storage is temporarily unavailable.', 502)
     if resp.status_code != 200:
         resp.close()
         return error_response('File is unavailable.', 502)
+    if provider == 'litterbox':
+        return redirect(file_info['url'])
     response = Response(resp.iter_content(chunk_size=64 * 1024), content_type='application/octet-stream')
     response.headers.set('Content-Disposition', 'attachment', filename=secure_filename(file_info['name']) or 'download')
     response.headers['Content-Length'] = str(file_info.get('size', 0))
@@ -719,9 +759,12 @@ def download_folder_zip(key):
     with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
         for file_info in files:
             try:
-                resp = requests.get(file_info['url'],
-                                    headers={'Authorization': blob_headers()['Authorization'], 'Accept-Encoding': 'identity'},
-                                    timeout=(10, 60))
+                if file_info.get('provider') == 'litterbox':
+                    resp = requests.get(file_info['url'], timeout=(10, 60))
+                else:
+                    resp = requests.get(file_info['url'],
+                                        headers={'Authorization': blob_headers()['Authorization'], 'Accept-Encoding': 'identity'},
+                                        timeout=(10, 60))
                 if resp.status_code == 200:
                     zf.writestr(file_info['name'], resp.content)
                     found += 1
