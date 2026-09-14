@@ -732,7 +732,14 @@ form.addEventListener("submit", async event => {
                         }
                     }
 
-                    const xhr = await uploadRequest(data, label);
+                    let xhr;
+                    for (let attempt = 0; attempt < 3; attempt++) {
+                        xhr = await uploadRequest(data, label);
+                        if (xhr.status !== 429) break;
+                        const retryAfter = parseInt(xhr.getResponseHeader("Retry-After") || "30", 10);
+                        status.textContent = `${label}: rate limited. Retrying in ${retryAfter}s...`;
+                        await new Promise(r => setTimeout(r, retryAfter * 1000));
+                    }
                     const httpError = xhr.status === 413
                         ? "Upload too large for this deployment or host (413). Try a smaller file; hosting may cap uploads below the displayed limit."
                         : xhr.status === 429
