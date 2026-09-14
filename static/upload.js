@@ -641,6 +641,7 @@ form.addEventListener("submit", async event => {
     event.preventDefault();
     if (busy || !form.reportValidity()) return;
     const mode = form.elements.mode.value;
+    const serverMode = mode === "folder" ? "file" : mode;
     const expire = form.elements.expire.value;
     const storageProvider = form.elements.storageProvider.value;
     const text = textInput.value;
@@ -704,7 +705,7 @@ form.addEventListener("submit", async event => {
             try {
                 if (mode === "text" || storageProvider === "vercel") {
                     const data = new FormData();
-                    data.append("mode", mode);
+                    data.append("mode", serverMode);
                     data.append("expire", expire);
                     if (mode === "file" || mode === "folder") data.append("storageProvider", storageProvider);
                     if (customKey) data.append("customKey", customKey);
