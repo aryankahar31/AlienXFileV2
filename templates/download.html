@@ -221,9 +221,11 @@
                 <div class="folder-files">
                 {% for file in share.files %}
                     <div class="folder-file">
-                        <span class="folder-file-name">{{ file.name }}</span>
-                        <span class="folder-file-size">{{ file.size|filesizeformat }}</span>
-                        <a class="button secondary" href="{{ url_for('download_folder_file', key=share.key, index=loop.index0) }}" style="margin-left:8px;min-height:auto;padding:6px 12px;font-size:12px;">Download</a>
+                        <div class="folder-file-name">{{ file.name }}</div>
+                        <div class="folder-file-bottom">
+                            <span class="folder-file-size">{{ file.size|filesizeformat }}</span>
+                            <a class="button secondary" href="{{ url_for('download_folder_file', key=share.key, index=loop.index0) }}">Download</a>
+                        </div>
                     </div>
                 {% endfor %}
                 </div>
