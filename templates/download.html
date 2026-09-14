@@ -351,15 +351,21 @@
                     container.hidden = false;
                     document.getElementById('passwordPrompt').hidden = true;
                 } else if (type === 'file') {
-                    const encryptedUrl = Uint8Array.from(atob(data.dataset.encryptedUrl), c => c.charCodeAt(0));
-                    const decryptedUrl = new TextDecoder().decode(
-                        await crypto.subtle.decrypt({ name: 'AES-GCM', iv: ivBuf }, key, encryptedUrl));
                     const filename = data.dataset.filename;
+                    const downloadUrl = '{{ url_for("download_direct", key=share.key) }}';
                     const container = document.getElementById('decryptedContent');
-                    container.innerHTML = '<h2>' + filename + '</h2>' +
-                        '<a class="button" href="' + decryptedUrl + '">Download ' + filename + '</a>';
+                    container.innerHTML = '<h2>' + filename + '</h2><p>Downloading and decrypting file\u2026</p>';
                     container.hidden = false;
                     document.getElementById('passwordPrompt').hidden = true;
+
+                    const resp = await fetch(downloadUrl);
+                    if (!resp.ok) throw new Error('Could not fetch encrypted file.');
+                    const encryptedBuf = await resp.arrayBuffer();
+                    const decryptedBuf = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: ivBuf }, key, encryptedBuf);
+                    const blob = new Blob([decryptedBuf]);
+                    const blobUrl = URL.createObjectURL(blob);
+                    container.innerHTML = '<h2>' + filename + '</h2>' +
+                        '<a class="button" href="' + blobUrl + '" download="' + filename.replace(/"/g, '&quot;') + '">Download ' + filename + '</a>';
                 }
             } catch (e) {
                 errorEl.textContent = 'Decryption failed. Wrong password?';
@@ -401,5 +407,11 @@
         }
     </script>
     {% endif %}
+    <script>
+        if (localStorage.getItem('alienxfile_dark') === 'true' ||
+            (!localStorage.getItem('alienxfile_dark') && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+            document.body.classList.add('dark');
+        }
+    </script>
 </body>
 </html>

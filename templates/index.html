@@ -256,7 +256,7 @@
         setTimeout(function() {
             document.getElementById('loadingScreen').classList.add('hidden');
         }, 1600);
-        if (localStorage.getItem('alienxfile_dark') === '1' ||
+        if (localStorage.getItem('alienxfile_dark') === 'true' ||
             (!localStorage.getItem('alienxfile_dark') && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
             document.body.classList.add('dark');
         }

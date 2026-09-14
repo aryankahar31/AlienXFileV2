@@ -32,7 +32,7 @@ body {
     background-size: 24px 24px;
     color: var(--black);
     min-height: 100vh;
-    padding: 32px 16px;
+    padding: 40px 20px;
     display: grid;
     place-items: center;
 }
@@ -99,8 +99,8 @@ a:hover { color: var(--pink); }
     border-radius: var(--radius);
     box-shadow: var(--shadow);
     width: 100%;
-    max-width: 660px;
-    padding: 40px 36px;
+    max-width: 780px;
+    padding: 48px 40px;
     animation: cardIn 0.4s ease-out;
 }
 @keyframes cardIn { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
@@ -151,17 +151,17 @@ h1 {
 }
 .expire-section label { font-weight: 600; font-size: 14px; white-space: nowrap; }
 .expire-section select {
-    flex: 1; background: #fff; border: 2px solid var(--black);
+    flex: 1; max-width: 160px; background: #fff; border: 2px solid var(--black);
     border-radius: var(--radius); padding: 8px 12px; font-size: 14px;
     font-weight: 600; font-family: var(--font-main); cursor: pointer; color: var(--black);
 }
 
 /* ========== EXPIRY PRESET BUTTONS ========== */
 .expire-presets {
-    display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px;
+    display: flex; flex-wrap: wrap; gap: 6px;
 }
 .preset-btn {
-    padding: 6px 14px; font-size: 12px; font-weight: 700;
+    padding: 7px 16px; font-size: 13px; font-weight: 700;
     font-family: var(--font-main); border: var(--border-light); border-radius: var(--radius);
     background: #fff; color: var(--black); cursor: pointer;
     transition: all 0.1s ease; box-shadow: none; min-height: auto;
@@ -304,19 +304,20 @@ button[type="submit"]:active { transform: translate(2px, 2px); box-shadow: 1px 1
 
 /* ========== DOWNLOAD CTA ========== */
 .download-cta {
-    display: block; text-align: center; padding: 14px;
+    display: flex; flex-direction: column; align-items: center; text-align: center;
+    padding: 20px 24px;
     border: var(--border); border-radius: var(--radius);
-    background: var(--cream); text-decoration: none; font-weight: 700;
-    font-size: 15px; box-shadow: var(--shadow-sm); transition: all 0.1s ease;
+    background: var(--yellow); text-decoration: none; font-weight: 700;
+    font-size: 17px; box-shadow: var(--shadow); transition: all 0.1s ease;
     color: var(--black); margin-bottom: 0;
 }
 .download-cta:hover {
-    background: var(--cyan); transform: translate(-2px, -2px);
-    box-shadow: var(--shadow); color: var(--black);
+    transform: translate(-2px, -2px);
+    box-shadow: var(--shadow-hover); color: var(--black);
 }
 .download-cta small {
-    display: block; font-weight: 400; font-size: 12px; color: #888;
-    margin-top: 2px;
+    display: block; font-weight: 400; font-size: 13px; color: #555;
+    margin-top: 4px;
 }
 
 /* ========== BULK DOWNLOAD BTN ========== */
@@ -747,13 +748,14 @@ body.dark .box { background: #161b22; }
 
 /* ========== RESPONSIVE ========== */
 @media (max-width: 600px) {
-    body { padding: 16px 10px; }
-    .card { padding: 28px 20px; }
+    body { padding: 20px 12px; }
+    .card { padding: 28px 20px; max-width: 100%; }
     h1 { font-size: 28px; }
     .mode-switch { flex-direction: column; }
     .mode-switch label { border-right: 0; border-bottom: var(--border); }
     .mode-switch label:last-of-type { border-bottom: 0; }
     .expire-section { flex-direction: column; align-items: stretch; }
+    .expire-section select { max-width: 100%; }
     .expire-presets { justify-content: flex-start; }
     .how-grid { grid-template-columns: repeat(2, 1fr); }
     .about-cards { grid-template-columns: 1fr; }
@@ -771,10 +773,17 @@ body.dark .box { background: #161b22; }
     .password-prompt input { max-width: 100%; }
     .url-preview { padding: 10px; }
     .bulk-download-btn { width: 100%; }
+    .download-cta { padding: 16px 16px; font-size: 16px; }
+    .download-cta small { font-size: 12px; }
 }
 
 @media (min-width: 601px) and (max-width: 900px) {
-    .card { max-width: 600px; }
+    .card { max-width: 700px; }
+}
+
+@media (min-width: 901px) {
+    .card { max-width: 780px; }
+    body { padding: 48px 24px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
