@@ -546,8 +546,9 @@ assert app.config['MAX_CONTENT_LENGTH'] == 1_001_000_000
             with app.app_context():
                 db = get_db()
                 schema = db.execute('PRAGMA table_info(shares)').fetchall()
-                self.assertEqual([row['name'] for row in schema], [*columns, 'provider'])
-                self.assertEqual(schema[-1]['type'].upper(), 'TEXT')
+                self.assertEqual([row['name'] for row in schema],
+                                 [*columns, 'provider', 'salt', 'iv', 'is_encrypted'])
+                self.assertEqual(schema[-1]['type'].upper(), 'INTEGER')
                 rows = db.execute('SELECT * FROM shares ORDER BY key').fetchall()
                 self.assertEqual([tuple(row[name] for name in columns) for row in rows], legacy)
                 self.assertEqual([row['provider'] for row in rows], [None, 'vercel', 'litterbox', 'litterbox'])
@@ -771,9 +772,11 @@ with patch('flask_app.time.time', return_value=float(sys.argv[2])), patch(
             self.assertEqual(share['storageProvider'], 'vercel')
             with app.app_context():
                 db = get_db()
-                column = db.execute('PRAGMA table_info(shares)').fetchall()[-1]
-                self.assertEqual((column['name'], column['type'], column['dflt_value']),
-                                 ('provider', 'TEXT', "'vercel'"))
+                columns = {col['name'] for col in db.execute('PRAGMA table_info(shares)').fetchall()}
+                self.assertIn('provider', columns)
+                self.assertIn('salt', columns)
+                self.assertIn('iv', columns)
+                self.assertIn('is_encrypted', columns)
                 row = db.execute('SELECT provider FROM shares WHERE key = ?', (share['key'],)).fetchone()
                 self.assertEqual(row['provider'], 'vercel')
             self.assertEqual(put.call_args.kwargs['headers']['x-vercel-blob-access'], 'private')

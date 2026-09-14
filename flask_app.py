@@ -1,3 +1,4 @@
+import html as html_mod
 import ipaddress
 import logging
 import os
@@ -5,6 +6,7 @@ import re
 import secrets
 import sqlite3
 import time
+import zipfile
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
@@ -16,6 +18,7 @@ from flask import Flask, Response, g, jsonify, redirect, render_template, reques
 from qrcode.image.svg import SvgPathImage
 from psycopg.rows import dict_row
 from requests_toolbelt.multipart.encoder import MultipartEncoder
+from urllib.parse import urlparse
 from werkzeug.exceptions import HTTPException
 from werkzeug.utils import secure_filename
 
@@ -49,14 +52,15 @@ app.config.update(
 )
 if os.environ.get('RENDER') == 'true' and not app.config['DATABASE_URL']:
     raise RuntimeError('Set DATABASE_URL to a persistent PostgreSQL database before starting on Render.')
-expire_seconds = {'1h': 3600, '12h': 43200, '24h': 86400, '72h': 259200}
+expire_seconds = {'1h': 3600, '12h': 43200, '24h': 86400, '72h': 259200, '168h': 604800}
 banned_exts = {'.exe', '.scr', '.cpl', '.jar', '.bat', '.cmd', '.com', '.pif', '.vbs', '.wsf'}
 BLOB_API = 'https://vercel.com/api/blob'
 SCHEMA = '''
     CREATE TABLE IF NOT EXISTS shares (
         key TEXT PRIMARY KEY, type TEXT NOT NULL, name TEXT NOT NULL,
         content TEXT, url TEXT, size INTEGER NOT NULL, expires DOUBLE PRECISION NOT NULL,
-        provider TEXT DEFAULT 'vercel'
+        provider TEXT DEFAULT 'vercel',
+        salt TEXT, iv TEXT, is_encrypted INTEGER DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS shares_expiry ON shares(expires);
     CREATE TABLE IF NOT EXISTS rate_limits (
@@ -83,9 +87,13 @@ def get_db():
             g.db.executescript(SCHEMA)
             with g.db:
                 g.db.execute('BEGIN IMMEDIATE')
-                if not any(column['name'] == 'provider' for column in g.db.execute('PRAGMA table_info(shares)')):
+                cols = [column['name'] for column in g.db.execute('PRAGMA table_info(shares)')]
+                if 'provider' not in cols:
                     g.db.execute('ALTER TABLE shares ADD COLUMN provider TEXT')
                     g.db.execute(BACKFILL_PROVIDER)
+                for col_name, col_type in [('salt', 'TEXT'), ('iv', 'TEXT'), ('is_encrypted', 'INTEGER DEFAULT 0')]:
+                    if col_name not in cols:
+                        g.db.execute(f'ALTER TABLE shares ADD COLUMN {col_name} {col_type}')
     return g.db
 
 
@@ -107,8 +115,10 @@ def init_db():
             db.execute(SCHEMA)
             db.execute('ALTER TABLE shares ADD COLUMN IF NOT EXISTS provider TEXT')
             db.execute(BACKFILL_PROVIDER)
-            # Old Render workers can still finish seven-column Vercel inserts during deployment.
             db.execute("ALTER TABLE shares ALTER COLUMN provider SET DEFAULT 'vercel'")
+            db.execute('ALTER TABLE shares ADD COLUMN IF NOT EXISTS salt TEXT')
+            db.execute('ALTER TABLE shares ADD COLUMN IF NOT EXISTS iv TEXT')
+            db.execute('ALTER TABLE shares ADD COLUMN IF NOT EXISTS is_encrypted INTEGER DEFAULT 0')
 
 
 @app.teardown_appcontext
@@ -177,7 +187,7 @@ def cleanup_shares():
 
 
 def error_response(message, status):
-    if request.path == '/upload':
+    if request.path in ('/upload', '/upload-litterbox', '/bulk-download', '/api/url-meta'):
         return jsonify(success=False, uploads=[], errors=[], error=message), status
     return render_template('download.html', error=message), status
 
@@ -243,25 +253,42 @@ def response_headers(response):
 
 
 def share_details(row):
-    return dict(key=row['key'], type=row['type'], name=row['name'], content=row['content'],
+    result = dict(key=row['key'], type=row['type'], name=row['name'], content=row['content'],
                 storageProvider=row['provider'] if row['type'] == 'file' else None,
                 size=row['size'], expires=datetime.fromtimestamp(row['expires'], timezone.utc).isoformat(),
                 page_url=url_for('download_details', key=row['key'], _external=True),
                 link=url_for('download_direct', key=row['key'], _external=True))
+    is_enc = row['is_encrypted'] if 'is_encrypted' in row.keys() else 0
+    if is_enc:
+        result['is_encrypted'] = True
+        result['salt'] = row['salt']
+        result['iv'] = row['iv']
+        if row['type'] == 'text':
+            result['encrypted_content'] = row['content']
+        else:
+            result['encrypted_url'] = row['url']
+    else:
+        result['is_encrypted'] = False
+    return result
 
 
-def save_share(kind, name, size, expires, content=None, url=None, provider=None):
+def save_share(kind, name, size, expires, content=None, url=None, provider=None,
+               custom_key=None, salt=None, iv=None, is_encrypted=False):
     db = get_db()
     cleanup_expired(db)
     with transaction(db):
         for _ in range(100):
-            key = f'{secrets.randbelow(100_000):05d}'
-            inserted = query(db, '''INSERT INTO shares (key, type, name, content, url, size, expires, provider)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            key = custom_key if custom_key else f'{secrets.randbelow(100_000):05d}'
+            inserted = query(db, '''INSERT INTO shares (key, type, name, content, url, size, expires, provider,
+                                                        salt, iv, is_encrypted)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                                      ON CONFLICT(key) DO NOTHING''',
-                              (key, kind, name, content, url, size, expires, provider))
+                              (key, kind, name, content, url, size, expires, provider,
+                               salt, iv, 1 if is_encrypted else 0))
             if inserted.rowcount:
                 break
+            if custom_key:
+                return None
         else:
             raise ValueError('No share code available. Try again later.')
     row = query(db, 'SELECT * FROM shares WHERE key = ?', (key,)).fetchone()
@@ -312,6 +339,14 @@ def download_page():
 def upload():
     mode = request.form.get('mode', 'file')
     expiry = request.form.get('expire', '1h')
+    custom_key = request.form.get('customKey', '').strip() or None
+    if custom_key and not re.fullmatch(r'[0-9]{5}', custom_key):
+        return error_response('Custom code must be exactly 5 digits.', 400)
+    is_encrypted = request.form.get('isEncrypted') == '1'
+    salt = request.form.get('salt') or None
+    iv_val = request.form.get('iv') or None
+    if is_encrypted and (not salt or not iv_val):
+        return error_response('Encryption parameters missing.', 400)
     if mode not in {'file', 'text'} or expiry not in expire_seconds:
         return error_response('Choose a valid share mode and expiration.', 400)
     if mode == 'text':
@@ -322,7 +357,10 @@ def upload():
             return error_response(f'Enter text between 1 and {app.config["MAX_TEXT_LENGTH"]} characters.', 400)
         try:
             shared = save_share('text', 'Shared Text', len(text.encode('utf-8')),
-                                time.time() + expire_seconds[expiry], content=text)
+                                time.time() + expire_seconds[expiry], content=text,
+                                custom_key=custom_key, salt=salt, iv=iv_val, is_encrypted=is_encrypted)
+            if shared is None:
+                return error_response('That custom code is already taken.', 409)
         except ValueError as exc:
             return error_response(str(exc), 503)
         return jsonify(success=True, uploads=[shared], errors=[])
@@ -405,7 +443,11 @@ def upload():
                         link = response.text.strip()
                 if not re.fullmatch(r'https://litter\.catbox\.moe/[A-Za-z0-9][A-Za-z0-9._-]*', link):
                     raise ValueError('Storage provider returned an invalid file link.')
-            uploads.append(save_share('file', filename, size, expires, url=link, provider=provider))
+            uploads.append(save_share('file', filename, size, expires, url=link, provider=provider,
+                                      custom_key=custom_key, salt=salt, iv=iv_val, is_encrypted=is_encrypted))
+            if custom_key and uploads[-1] is None:
+                errors.append(f'{filename}: That custom code is already taken.')
+                uploads.pop()
         except (requests.RequestException, ValueError, OSError, sqlite3.Error, psycopg.Error) as exc:
             if stored_blob:
                 try:
@@ -436,6 +478,12 @@ def upload_litterbox():
     name = (data.get('name') or '').strip()[:255]
     size = data.get('size', 0)
     expire = data.get('expire', '1h')
+    custom_key = (data.get('customKey') or '').strip() or None
+    is_encrypted = data.get('isEncrypted') is True or data.get('isEncrypted') == '1'
+    salt = data.get('salt') or None
+    iv_val = data.get('iv') or None
+    if custom_key and not re.fullmatch(r'[0-9]{5}', custom_key):
+        return error_response('Custom code must be exactly 5 digits.', 400)
     if expire not in expire_seconds:
         return error_response('Choose a valid share mode and expiration.', 400)
     if not name:
@@ -448,7 +496,10 @@ def upload_litterbox():
         return error_response(f'{name}: This file extension is blocked.', 400)
     try:
         shared = save_share('file', name, int(size), time.time() + expire_seconds[expire],
-                            url=url, provider='litterbox')
+                            url=url, provider='litterbox', custom_key=custom_key,
+                            salt=salt, iv=iv_val, is_encrypted=is_encrypted)
+        if shared is None:
+            return error_response('That custom code is already taken.', 409)
     except ValueError as exc:
         return error_response(str(exc), 503)
     return jsonify(success=True, uploads=[shared], errors=[])
@@ -494,6 +545,87 @@ def download_share(key):
         image.save(output)
         return Response(output.getvalue(), mimetype='image/svg+xml')
     return render_template('download.html', share=share_details(row))
+
+
+@app.route('/bulk-download', methods=['POST'])
+def bulk_download():
+    data = request.get_json(silent=True) or {}
+    keys = data.get('keys', [])
+    if not keys or not isinstance(keys, list) or len(keys) > 10:
+        return jsonify(error='Provide 1-10 share keys.'), 400
+    db = get_db()
+    zip_buf = BytesIO()
+    found = 0
+    with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for key in keys:
+            if not isinstance(key, str) or not re.fullmatch(r'[0-9]{5}', key):
+                continue
+            row = query(db, 'SELECT * FROM shares WHERE key = ?', (key,)).fetchone()
+            if not row or row['type'] != 'file' or row['expires'] <= time.time():
+                continue
+            try:
+                if row['provider'] == 'litterbox':
+                    resp = requests.get(row['url'], timeout=(10, 60))
+                    if resp.status_code == 200:
+                        zf.writestr(row['name'], resp.content)
+                        found += 1
+                elif row['provider'] == 'vercel':
+                    resp = requests.get(row['url'],
+                                        headers={'Authorization': blob_headers()['Authorization'], 'Accept-Encoding': 'identity'},
+                                        timeout=(10, 60))
+                    if resp.status_code == 200:
+                        zf.writestr(row['name'], resp.content)
+                        found += 1
+            except (requests.RequestException, ValueError):
+                continue
+    if not found:
+        return jsonify(error='No valid files found for the provided codes.'), 404
+    zip_buf.seek(0)
+    return Response(zip_buf.getvalue(), mimetype='application/zip',
+                    headers={'Content-Disposition': f'attachment; filename="alienxfile-{found}-files.zip"'})
+
+
+@app.route('/api/url-meta', methods=['POST'])
+def url_meta():
+    data = request.get_json(silent=True) or {}
+    url = (data.get('url') or '').strip()
+    if not url or not url.startswith(('http://', 'https://')):
+        return jsonify(error='Provide a valid URL.'), 400
+    try:
+        parsed = urlparse(url)
+        resp = requests.get(url, timeout=(5, 10), headers={
+            'User-Agent': 'Mozilla/5.0 (compatible; AlienXFile/2.0)',
+            'Accept': 'text/html',
+        }, allow_redirects=True)
+        if resp.status_code != 200:
+            return jsonify(error=f'Could not fetch URL (HTTP {resp.status_code}).'), 402
+        body = resp.text[:100_000]
+        title = ''
+        desc = ''
+        for pattern, attr in [
+            (r'<title[^>]*>(.*?)</title>', 'title'),
+            (r'<meta[^>]*property=["\']og:title["\'][^>]*content=["\']([^"\']+)', 'og_title'),
+            (r'<meta[^>]*content=["\']([^"\']+)["\'][^>]*property=["\']og:title', 'og_title2'),
+            (r'<meta[^>]*name=["\']description["\'][^>]*content=["\']([^"\']+)', 'desc'),
+            (r'<meta[^>]*property=["\']og:description["\'][^>]*content=["\']([^"\']+)', 'og_desc'),
+            (r'<meta[^>]*content=["\']([^"\']+)["\'][^>]*property=["\']og:description', 'og_desc2'),
+        ]:
+            m = re.search(pattern, body, re.IGNORECASE | re.DOTALL)
+            if m:
+                val = html_mod.unescape(m.group(1).strip())
+                if attr == 'title' and not title:
+                    title = val[:200]
+                elif attr.startswith('og_title') and not title:
+                    title = val[:200]
+                elif attr == 'desc' and not desc:
+                    desc = val[:500]
+                elif attr.startswith('og_desc') and not desc:
+                    desc = val[:500]
+        if not title:
+            title = parsed.netloc or url[:100]
+        return jsonify(title=title, description=desc, url=url)
+    except (requests.RequestException, ValueError):
+        return jsonify(error='Could not fetch URL metadata.'), 502
 
 
 @app.errorhandler(HTTPException)

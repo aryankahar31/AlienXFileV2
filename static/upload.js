@@ -1,27 +1,265 @@
 "use strict";
 
+// ── DOM Elements ──────────────────────────────────────────────────────────────
 const form = document.getElementById("uploadForm");
 const controls = document.getElementById("uploadControls");
 const fileInput = document.getElementById("fileInput");
 const textInput = document.getElementById("textInput");
 const fileLabel = document.getElementById("fileInputLabel");
+const fileInputText = document.getElementById("fileInputText");
 const status = document.getElementById("uploadStatus");
 const progress = document.getElementById("uploadProgress");
 const cancel = document.getElementById("cancelUpload");
 const result = document.getElementById("result");
+const expireSelect = document.getElementById("expire");
+const storageOptions = document.getElementById("storageOptions");
+const fileInputContainer = document.getElementById("fileInputContainer");
+const textInputContainer = document.getElementById("textInputContainer");
+const selectedFiles = document.getElementById("selectedFiles");
+const cancelNotice = document.getElementById("cancelNotice");
 const bannedExts = JSON.parse(document.getElementById("bannedExtensions").textContent);
 const maxBytes = Number(form.dataset.maxBytes);
 const litterboxMaxBytes = Number(form.dataset.litterboxMaxBytes);
 const maxTextLength = Number(form.dataset.maxTextLength);
+
+// ── State ─────────────────────────────────────────────────────────────────────
 let busy = false;
 let cancelled = false;
 let activeRequest = null;
+const LITTERBOX_PROXY_URL = "https://alienxfile-proxy.fly.dev";
 
+// ══════════════════════════════════════════════════════════════════════════════
+// FEATURE 4: Dark mode toggle
+// ══════════════════════════════════════════════════════════════════════════════
+(function initDarkMode() {
+    let toggle = document.getElementById("darkToggle");
+    if (!toggle) {
+        toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.id = "darkToggle";
+        toggle.textContent = "\u263E";
+        toggle.title = "Toggle dark mode";
+        toggle.setAttribute("aria-label", "Toggle dark mode");
+        toggle.className = "dark-toggle";
+        const card = document.querySelector(".card");
+        if (card) card.prepend(toggle);
+    }
+
+    const saved = localStorage.getItem("alienxfile_dark");
+    if (saved === "true") document.body.classList.add("dark");
+    else if (saved === null && window.matchMedia("(prefers-color-scheme: dark)").matches) document.body.classList.add("dark");
+    toggle.textContent = document.body.classList.contains("dark") ? "\u2600" : "\u263E";
+
+    toggle.addEventListener("click", () => {
+        document.body.classList.toggle("dark");
+        const isDark = document.body.classList.contains("dark");
+        toggle.textContent = isDark ? "\u2600" : "\u263E";
+        try { localStorage.setItem("alienxfile_dark", String(isDark)); } catch {}
+    });
+})();
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FEATURE 9: Expiry selector presets
+// ══════════════════════════════════════════════════════════════════════════════
+(function initExpiryPresets() {
+    const btns = document.querySelectorAll(".preset-btn");
+    if (!btns.length) return;
+    for (const btn of btns) {
+        btn.addEventListener("click", () => {
+            expireSelect.value = btn.dataset.expire;
+            for (const b of btns) {
+                b.classList.toggle("active", b === btn);
+                b.setAttribute("aria-checked", String(b === btn));
+            }
+        });
+    }
+})();
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FEATURE 12: Custom codes input (uses existing #customCode from HTML)
+// ══════════════════════════════════════════════════════════════════════════════
+const customKeyInput = document.getElementById("customCode");
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FEATURE 6: Password-protected shares (uses existing #sharePassword from HTML)
+// ══════════════════════════════════════════════════════════════════════════════
+const passwordInput = document.getElementById("sharePassword");
+
+const hasCrypto = typeof crypto !== "undefined" && crypto.subtle;
+
+function bufToBase64(buffer) {
+    const bytes = new Uint8Array(buffer);
+    let binary = "";
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    return btoa(binary);
+}
+
+function base64ToBuf(b64) {
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes.buffer;
+}
+
+async function deriveKeyFromPassword(password, salt) {
+    const enc = new TextEncoder();
+    const keyMaterial = await crypto.subtle.importKey("raw", enc.encode(password), "PBKDF2", false, ["deriveKey"]);
+    return crypto.subtle.deriveKey(
+        { name: "PBKDF2", salt, iterations: 100000, hash: "SHA-256" },
+        keyMaterial,
+        { name: "AES-GCM", length: 256 },
+        false,
+        ["encrypt", "decrypt"]
+    );
+}
+
+async function encryptContent(password, plaintext) {
+    const enc = new TextEncoder();
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const key = await deriveKeyFromPassword(password, salt);
+    const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, enc.encode(plaintext));
+    return { salt: bufToBase64(salt), iv: bufToBase64(iv), data: bufToBase64(encrypted) };
+}
+
+async function decryptContent(password, saltB64, ivB64, dataB64) {
+    const key = await deriveKeyFromPassword(password, base64ToBuf(saltB64));
+    const dec = new TextDecoder();
+    const decrypted = await crypto.subtle.decrypt(
+        { name: "AES-GCM", iv: new Uint8Array(base64ToBuf(ivB64)) },
+        key,
+        base64ToBuf(dataB64)
+    );
+    return dec.decode(decrypted);
+}
+
+async function encryptFileContent(password, file) {
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const key = await deriveKeyFromPassword(password, salt);
+    const arrayBuf = await file.arrayBuffer();
+    const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, arrayBuf);
+    const encryptedBlob = new Blob([encrypted], { type: "application/octet-stream" });
+    return { encryptedBlob, salt: bufToBase64(salt), iv: bufToBase64(iv) };
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FEATURE 1: Paste image from clipboard
+// ══════════════════════════════════════════════════════════════════════════════
+document.addEventListener("paste", (e) => {
+    if (busy) return;
+    if (form.elements.mode.value !== "file" || fileInput.disabled) return;
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    const imageFiles = [];
+    for (const item of items) {
+        if (item.type.startsWith("image/")) {
+            const file = item.getAsFile();
+            if (file) imageFiles.push(file);
+        }
+    }
+    if (!imageFiles.length) return;
+    e.preventDefault();
+    const dt = new DataTransfer();
+    for (const f of imageFiles) dt.items.add(f);
+    const existing = Array.from(fileInput.files);
+    for (const f of existing) dt.items.add(f);
+    fileInput.files = dt.files;
+    updateFiles();
+    status.textContent = `Image pasted from clipboard.${imageFiles.length > 1 ? ` (${imageFiles.length} images)` : ""}`;
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FEATURE 3: Drag & drop visual feedback
+// ══════════════════════════════════════════════════════════════════════════════
+let dragCounter = 0;
+
+fileLabel.addEventListener("dragenter", (e) => {
+    e.preventDefault();
+    dragCounter++;
+    if (busy || fileInput.disabled) return;
+    const files = e.dataTransfer?.files;
+    if (files && files.length) {
+        const count = files.length;
+        const size = Array.from(files).reduce((s, f) => s + f.size, 0);
+        fileInputText.textContent = `Drop ${count} file${count !== 1 ? "s" : ""} (${formatSize(size)})`;
+    }
+    fileLabel.classList.add("dragover");
+});
+
+fileLabel.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    if (!busy) fileLabel.classList.add("dragover");
+});
+
+fileLabel.addEventListener("dragleave", (e) => {
+    e.preventDefault();
+    dragCounter--;
+    if (dragCounter <= 0) {
+        dragCounter = 0;
+        fileLabel.classList.remove("dragover");
+        fileInputText.textContent = fileInput.files.length
+            ? `${fileInput.files.length} file(s) selected. Choose again to replace.`
+            : "Choose files or drag here";
+    }
+});
+
+fileLabel.addEventListener("drop", (e) => {
+    e.preventDefault();
+    dragCounter = 0;
+    fileLabel.classList.remove("dragover");
+    fileInputText.textContent = "Choose files or drag here";
+    if (busy || fileInput.disabled) return;
+    fileInput.files = e.dataTransfer.files;
+    updateFiles();
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FEATURE 13: URL metadata fetch (uses existing #urlPreview from HTML)
+// ══════════════════════════════════════════════════════════════════════════════
+const urlPreviewEl = document.getElementById("urlPreview");
+const urlPreviewTitle = document.getElementById("urlPreviewTitle");
+const urlPreviewDesc = document.getElementById("urlPreviewDesc");
+
+async function fetchUrlMeta(url) {
+    if (!urlPreviewEl || !url.match(/^https?:\/\//i)) return;
+    urlPreviewEl.hidden = true;
+    if (!url.match(/^https?:\/\//i)) return;
+    try {
+        const resp = await fetch("/api/url-meta", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url }),
+        });
+        if (!resp.ok) return;
+        const meta = await resp.json();
+        if (!meta || (!meta.title && !meta.description)) return;
+        if (urlPreviewTitle) urlPreviewTitle.textContent = meta.title || "";
+        if (urlPreviewDesc) urlPreviewDesc.textContent = meta.description ? (meta.description.length > 200 ? meta.description.slice(0, 200) + "\u2026" : meta.description) : "";
+        urlPreviewEl.hidden = false;
+    } catch {}
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FEATURE 8: Share via URL paste (detect in textarea)
+// ══════════════════════════════════════════════════════════════════════════════
+let urlDebounce = null;
+textInput.addEventListener("input", () => {
+    clearTimeout(urlDebounce);
+    if (urlPreviewEl) urlPreviewEl.hidden = true;
+    const val = textInput.value.trim();
+    if (!val.match(/^https?:\/\//i)) return;
+    urlDebounce = setTimeout(() => fetchUrlMeta(val), 600);
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Core: Mode switching, file validation, file list update
+// ══════════════════════════════════════════════════════════════════════════════
 function switchMode() {
     const isFile = form.elements.mode.value === "file";
-    document.getElementById("fileInputContainer").hidden = !isFile;
-    document.getElementById("textInputContainer").hidden = isFile;
-    document.getElementById("storageOptions").disabled = !isFile;
+    fileInputContainer.hidden = !isFile;
+    textInputContainer.hidden = isFile;
+    storageOptions.disabled = !isFile;
     fileInput.disabled = !isFile;
     fileInput.required = isFile;
     textInput.disabled = isFile;
@@ -38,21 +276,26 @@ function fileError(file, storageProvider = form.elements.storageProvider.value) 
     return "";
 }
 
+function formatSize(bytes) {
+    if (bytes < 1024) return bytes + " B";
+    if (bytes < 1048576) return (bytes / 1024).toFixed(1) + " KB";
+    return (bytes / 1048576).toFixed(1) + " MB";
+}
+
 function updateFiles() {
     const isLitterbox = form.elements.storageProvider.value === "litterbox";
     document.getElementById("fileLimits").textContent = isLitterbox
         ? `Litterbox: up to approximately 1 GB per file (${litterboxMaxBytes.toLocaleString()} bytes). Hosting or the provider may reject large files.`
         : `AlienXFile Storage: up to ${form.dataset.limitLabel} per file (${maxBytes.toLocaleString()} bytes).`;
     document.getElementById("storageWarning").hidden = !isLitterbox;
-    const list = document.getElementById("selectedFiles");
-    list.replaceChildren();
+    selectedFiles.replaceChildren();
     for (const file of fileInput.files) {
         const item = document.createElement("li");
         const error = fileError(file);
-        item.textContent = `${file.name} (${file.size.toLocaleString()} bytes)${error ? ` - ${error}` : ""}`;
-        list.append(item);
+        item.textContent = `${file.name} (${formatSize(file.size)})${error ? ` - ${error}` : ""}`;
+        selectedFiles.append(item);
     }
-    document.getElementById("fileInputText").textContent = fileInput.files.length
+    fileInputText.textContent = fileInput.files.length
         ? `${fileInput.files.length} file(s) selected. Choose again to replace.`
         : "Choose files or drag here";
 }
@@ -64,21 +307,144 @@ form.addEventListener("reset", () => requestAnimationFrame(() => {
     updateFiles();
 }));
 fileInput.addEventListener("change", updateFiles);
-fileLabel.addEventListener("dragover", event => {
-    event.preventDefault();
-    if (!busy) fileLabel.classList.add("dragover");
-});
-fileLabel.addEventListener("dragleave", () => fileLabel.classList.remove("dragover"));
-fileLabel.addEventListener("drop", event => {
-    event.preventDefault();
-    fileLabel.classList.remove("dragover");
-    if (busy || fileInput.disabled) return;
-    fileInput.files = event.dataTransfer.files;
-    updateFiles();
-});
 
+// ══════════════════════════════════════════════════════════════════════════════
+// FEATURE 10: File type icons in results
+// ══════════════════════════════════════════════════════════════════════════════
+const FILE_ICONS = {
+    image: { exts: ["png","jpg","jpeg","gif","svg","webp","bmp","ico"], svg: '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg>' },
+    code:   { exts: ["js","py","html","css","json","ts","jsx","tsx","java","c","cpp","h","go","rs","rb","php","swift","kt","rs","sh","bash","yaml","yml","toml","xml"], svg: '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M9.4 16.6L4.8 12l4.6-4.6L8 6l-6 6 6 6 1.4-1.4zm5.2 0l4.6-4.6-4.6-4.6L16 6l6 6-6 6-1.4-1.4z"/></svg>' },
+    doc:    { exts: ["txt","md","pdf","doc","docx","rtf","odt","xls","xlsx","ppt","pptx","csv"], svg: '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm-1 7V3.5L18.5 9H13zM6 20V4h5v7h7v9H6z"/></svg>' },
+    archive:{ exts: ["zip","tar","gz","rar","7z","bz2","xz","tgz"], svg: '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M20 6h-8l-2-2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm-6 10h-2v-2h2v2zm0-4h-2V8h2v4z"/></svg>' },
+    audio:  { exts: ["mp3","wav","ogg","flac","aac","m4a","wma"], svg: '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg>' },
+    video:  { exts: ["mp4","webm","mkv","avi","mov","flv","wmv"], svg: '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg>' },
+};
+const DEFAULT_ICON = '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm-1 7V3.5L18.5 9H13zM6 20V4h5v7h7v9H6z"/></svg>';
+
+function getFileIcon(filename) {
+    const ext = filename.split(".").pop()?.toLowerCase() || "";
+    for (const [, cfg] of Object.entries(FILE_ICONS)) {
+        if (cfg.exts.includes(ext)) return cfg.svg;
+    }
+    return DEFAULT_ICON;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FEATURE 2: Upload history (localStorage)
+// ══════════════════════════════════════════════════════════════════════════════
+const HISTORY_KEY = "alienxfile_history";
+const HISTORY_MAX = 20;
+
+function getHistory() {
+    try { return JSON.parse(localStorage.getItem(HISTORY_KEY)) || []; }
+    catch { return []; }
+}
+
+function saveHistory(entry) {
+    const history = getHistory();
+    history.unshift(entry);
+    if (history.length > HISTORY_MAX) history.length = HISTORY_MAX;
+    try { localStorage.setItem(HISTORY_KEY, JSON.stringify(history)); } catch {}
+}
+
+function timeAgo(ts) {
+    const diff = Date.now() - ts;
+    const mins = Math.floor(diff / 60000);
+    if (mins < 1) return "just now";
+    if (mins < 60) return `${mins}m ago`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return `${hrs}h ago`;
+    const days = Math.floor(hrs / 24);
+    return `${days}d ago`;
+}
+
+function renderHistory() {
+    const section = document.getElementById("uploadHistory");
+    const list = document.getElementById("historyList");
+    const clearBtn = document.getElementById("historyClear");
+    if (!section || !list) return;
+    const history = getHistory();
+    list.replaceChildren();
+    if (!history.length) {
+        section.hidden = true;
+        return;
+    }
+    section.hidden = false;
+    for (const entry of history.slice(0, 10)) {
+        const li = document.createElement("li");
+        li.className = "history-item";
+        const nameSpan = document.createElement("span");
+        nameSpan.className = "history-name";
+        nameSpan.textContent = entry.name;
+        const codeBtn = document.createElement("button");
+        codeBtn.type = "button";
+        codeBtn.className = "copy-btn history-key";
+        codeBtn.textContent = entry.key;
+        codeBtn.title = "Click to copy code";
+        codeBtn.addEventListener("click", async () => {
+            try {
+                await navigator.clipboard.writeText(entry.key);
+                status.textContent = `Code ${entry.key} copied.`;
+            } catch {
+                status.textContent = "Clipboard unavailable.";
+            }
+        });
+        const timeSpan = document.createElement("span");
+        timeSpan.className = "history-time";
+        timeSpan.textContent = timeAgo(entry.timestamp);
+        li.append(nameSpan, codeBtn, timeSpan);
+        list.append(li);
+    }
+    if (clearBtn) {
+        clearBtn.hidden = false;
+        clearBtn.onclick = () => {
+            try { localStorage.removeItem(HISTORY_KEY); } catch {}
+            section.hidden = true;
+            status.textContent = "History cleared.";
+        };
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FEATURE 7: Bulk download
+// ══════════════════════════════════════════════════════════════════════════════
+function showBulkDownloadButton(keys) {
+    if (keys.length < 2) return;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "bulk-download-btn";
+    btn.textContent = `Download All as ZIP (${keys.length} files)`;
+    btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        btn.textContent = "Preparing ZIP\u2026";
+        try {
+            const resp = await fetch("/bulk-download", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ keys }),
+            });
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const blob = await resp.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = `alienxfile-batch-${Date.now()}.zip`;
+            a.click();
+            setTimeout(() => URL.revokeObjectURL(url), 30000);
+            btn.textContent = "ZIP Downloaded";
+        } catch (err) {
+            btn.textContent = "Download failed. Try again.";
+            btn.disabled = false;
+            status.textContent = `Bulk download failed: ${err.message}`;
+        }
+    });
+    result.append(btn);
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// renderUpload — enhanced with file type icons (Feature 10)
+// ══════════════════════════════════════════════════════════════════════════════
 function renderUpload(upload, batch) {
-    // Never turn an API-supplied URL into an executable link.
     const pageURL = new URL(upload.page_url);
     const directURL = new URL(upload.link);
     const expires = new Date(upload.expires);
@@ -89,7 +455,16 @@ function renderUpload(upload, batch) {
     const item = document.createElement("article");
     item.className = "upload-item";
     const name = document.createElement("b");
-    name.textContent = upload.name || "Shared Text";
+    name.className = "upload-item-name";
+    if (upload.name) {
+        const iconSpan = document.createElement("span");
+        iconSpan.className = "file-type-icon";
+        iconSpan.innerHTML = getFileIcon(upload.name);
+        iconSpan.setAttribute("aria-hidden", "true");
+        name.append(iconSpan, upload.name);
+    } else {
+        name.textContent = "Shared Text";
+    }
     const codeLine = document.createElement("p");
     codeLine.className = "key-line";
     codeLine.textContent = `Code: ${upload.key}`;
@@ -154,8 +529,19 @@ function renderUpload(upload, batch) {
     batch.append(item);
 }
 
-const LITTERBOX_PROXY_URL = "https://alienxfile-proxy.fly.dev";
+// ══════════════════════════════════════════════════════════════════════════════
+// FEATURE 5: Upload progress with ETA
+// ══════════════════════════════════════════════════════════════════════════════
+function formatETA(seconds) {
+    if (seconds < 60) return `${Math.ceil(seconds)}s`;
+    const m = Math.floor(seconds / 60);
+    const s = Math.ceil(seconds % 60);
+    return `${m}m ${s}s`;
+}
 
+// ══════════════════════════════════════════════════════════════════════════════
+// uploadRequest with ETA tracking
+// ══════════════════════════════════════════════════════════════════════════════
 function uploadRequest(data, label, url, headers) {
     return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
@@ -163,17 +549,42 @@ function uploadRequest(data, label, url, headers) {
         xhr.open("POST", url || form.action);
         xhr.timeout = 30 * 60 * 1000;
         if (headers) for (const [k, v] of Object.entries(headers)) xhr.setRequestHeader(k, v);
+        let uploadStart = performance.now();
+        let lastLoaded = 0;
+        let lastTime = uploadStart;
+        let smoothedSpeed = 0;
         xhr.upload.onprogress = event => {
             if (!event.lengthComputable) {
                 progress.removeAttribute("value");
                 status.textContent = `${label}: uploading; percentage unavailable.`;
                 return;
             }
+            const now = performance.now();
+            const elapsed = (now - uploadStart) / 1000;
             const percent = Math.floor(event.loaded / event.total * 100);
             progress.value = percent;
-            status.textContent = percent === 100
-                ? `${label}: 100% uploaded. Waiting for storage provider / server confirmation.`
-                : `${label}: ${percent}% uploaded.`;
+
+            let etaText = "";
+            if (elapsed > 0.5) {
+                const dt = (now - lastTime) / 1000;
+                if (dt > 0.1) {
+                    const instantSpeed = (event.loaded - lastLoaded) / dt;
+                    smoothedSpeed = smoothedSpeed ? smoothedSpeed * 0.7 + instantSpeed * 0.3 : instantSpeed;
+                    lastLoaded = event.loaded;
+                    lastTime = now;
+                }
+                if (smoothedSpeed > 0) {
+                    const remaining = (event.total - event.loaded) / smoothedSpeed;
+                    etaText = ` | ETA: ${formatETA(remaining)}`;
+                }
+            }
+
+            if (percent === 100) {
+                status.textContent = `${label}: 100% uploaded. Waiting for storage provider / server confirmation.`;
+            } else {
+                const speedText = smoothedSpeed > 0 ? ` (${formatSize(Math.round(smoothedSpeed))}/s)` : "";
+                status.textContent = `${label}: ${percent}% uploaded${speedText}${etaText}.`;
+            }
         };
         xhr.upload.onload = () => {
             progress.value = 100;
@@ -187,12 +598,18 @@ function uploadRequest(data, label, url, headers) {
     });
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// Cancel button
+// ══════════════════════════════════════════════════════════════════════════════
 cancel.addEventListener("click", () => {
     cancelled = true;
     cancel.disabled = true;
     activeRequest?.abort();
 });
 
+// ══════════════════════════════════════════════════════════════════════════════
+// Form submission handler
+// ══════════════════════════════════════════════════════════════════════════════
 form.addEventListener("submit", async event => {
     event.preventDefault();
     if (busy || !form.reportValidity()) return;
@@ -200,18 +617,31 @@ form.addEventListener("submit", async event => {
     const expire = form.elements.expire.value;
     const storageProvider = form.elements.storageProvider.value;
     const text = textInput.value;
+    const password = passwordInput.value;
+    const customKey = customKeyInput.value.trim();
+
     if (mode === "text" && (!text.trim() || Array.from(text).length > maxTextLength)) {
         status.textContent = `Enter non-blank text of at most ${maxTextLength.toLocaleString()} characters.`;
         textInput.focus();
         return;
     }
+    if (customKey && !/^\d{5}$/.test(customKey)) {
+        status.textContent = "Custom code must be exactly 5 digits.";
+        customKeyInput.focus();
+        return;
+    }
+    if (password && !hasCrypto) {
+        status.textContent = "Password encryption requires a secure context (HTTPS). Your browser does not support it here.";
+        return;
+    }
+
     const queue = mode === "file" ? Array.from(fileInput.files) : [null];
     busy = true;
     cancelled = false;
     controls.disabled = true;
     cancel.disabled = false;
     cancel.hidden = false;
-    document.getElementById("cancelNotice").hidden = false;
+    cancelNotice.hidden = false;
     progress.hidden = false;
     result.hidden = false;
     const batch = document.createElement("section");
@@ -221,6 +651,7 @@ form.addEventListener("submit", async event => {
     result.append(batch);
     let completed = 0;
     let failures = 0;
+    const allKeys = [];
     const addError = message => {
         const item = document.createElement("p");
         item.className = "upload-item error-item";
@@ -249,7 +680,30 @@ form.addEventListener("submit", async event => {
                     data.append("mode", mode);
                     data.append("expire", expire);
                     if (mode === "file") data.append("storageProvider", storageProvider);
-                    data.append(mode === "file" ? "file" : "text", file || text);
+                    if (customKey) data.append("customKey", customKey);
+
+                    if (mode === "text") {
+                        if (password && hasCrypto) {
+                            const enc = await encryptContent(password, text);
+                            data.append("text", enc.data);
+                            data.append("salt", enc.salt);
+                            data.append("iv", enc.iv);
+                            data.append("isEncrypted", "1");
+                        } else {
+                            data.append("text", text);
+                        }
+                    } else {
+                        if (password && hasCrypto) {
+                            const { encryptedBlob, salt, iv } = await encryptFileContent(password, file);
+                            data.append("file", encryptedBlob, file.name);
+                            data.append("salt", salt);
+                            data.append("iv", iv);
+                            data.append("isEncrypted", "1");
+                        } else {
+                            data.append("file", file);
+                        }
+                    }
+
                     const xhr = await uploadRequest(data, label);
                     const httpError = xhr.status === 413
                         ? "Upload too large for this deployment or host (413). Try a smaller file; hosting may cap uploads below the displayed limit."
@@ -271,7 +725,9 @@ form.addEventListener("submit", async event => {
                     for (const upload of uploads) {
                         try {
                             renderUpload(upload, batch);
+                            allKeys.push(upload.key);
                             completed++;
+                            saveHistory({ key: upload.key, name: upload.name || "Shared Text", expires: upload.expires, timestamp: Date.now() });
                         } catch {
                             addError(`${name}: Invalid share details returned. The item may have been stored; verify before retrying.`);
                         }
@@ -281,9 +737,20 @@ form.addEventListener("submit", async event => {
                     else if (!uploads.length && !errors.length) addError(`${name}: No completed upload was returned.`);
                     else if (response.success !== true && !errors.length) addError(`${name}: The server reported a failure; any completed uploads are shown above.`);
                 } else {
+                    let fileToUpload = file;
+                    let litterboxSalt = "";
+                    let litterboxIv = "";
+                    let litterboxEncrypted = false;
+                    if (password && hasCrypto) {
+                        const { encryptedBlob, salt, iv } = await encryptFileContent(password, file);
+                        fileToUpload = new File([encryptedBlob], file.name, { type: "application/octet-stream" });
+                        litterboxSalt = salt;
+                        litterboxIv = iv;
+                        litterboxEncrypted = true;
+                    }
                     const paData = new FormData();
                     paData.append("time", expire);
-                    paData.append("fileToUpload", file);
+                    paData.append("fileToUpload", fileToUpload);
                     status.textContent = `${label}: uploading directly to storage...`;
                     const paXhr = await uploadRequest(paData, label, LITTERBOX_PROXY_URL + "/upload");
                     let paResponse;
@@ -300,7 +767,13 @@ form.addEventListener("submit", async event => {
                         throw new Error("Storage proxy returned an invalid URL.");
                     }
                     status.textContent = `${label}: file uploaded to storage. Saving share record...`;
-                    const saveData = JSON.stringify({ url: litterboxUrl, name: file.name, size: file.size, expire });
+                    const savePayload = { url: litterboxUrl, name: file.name, size: file.size, expire };
+                    if (litterboxEncrypted) {
+                        savePayload.salt = litterboxSalt;
+                        savePayload.iv = litterboxIv;
+                        savePayload.isEncrypted = true;
+                    }
+                    const saveData = JSON.stringify(savePayload);
                     const saveXhr = await uploadRequest(saveData, label, "/upload-litterbox", {"Content-Type": "application/json"});
                     let saveResponse;
                     try {
@@ -315,7 +788,9 @@ form.addEventListener("submit", async event => {
                     for (const upload of uploads) {
                         try {
                             renderUpload(upload, batch);
+                            allKeys.push(upload.key);
                             completed++;
+                            saveHistory({ key: upload.key, name: upload.name || "Shared Text", expires: upload.expires, timestamp: Date.now() });
                         } catch {
                             addError(`${name}: Invalid share details returned. The item may have been stored; verify before retrying.`);
                         }
@@ -340,11 +815,17 @@ form.addEventListener("submit", async event => {
         switchMode();
         progress.hidden = true;
         cancel.hidden = true;
-        document.getElementById("cancelNotice").hidden = !cancelled;
+        cancelNotice.hidden = !cancelled;
         if (cancelled) form.querySelector('button[type="submit"]').focus();
+        renderHistory();
+        showBulkDownloadButton(allKeys);
     }
 });
 
+// ══════════════════════════════════════════════════════════════════════════════
+// Init
+// ══════════════════════════════════════════════════════════════════════════════
 switchMode();
 updateFiles();
+renderHistory();
 controls.disabled = false;

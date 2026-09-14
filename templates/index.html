@@ -22,7 +22,7 @@
     {{ {'@context': 'https://schema.org', '@type': 'WebSite', 'name': 'AlienXFile', 'alternateName': 'AlienXFile V2', 'url': site_url, 'description': description}|tojson }}
     </script>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-    <script src="{{ url_for('static', filename='upload.js') }}?v=5" defer></script>
+    <script src="{{ url_for('static', filename='upload.js') }}?v=6" defer></script>
 </head>
 <body>
 
@@ -44,6 +44,7 @@
     </div>
 
     <main class="card">
+        <button type="button" class="dark-toggle" id="darkToggle" aria-label="Toggle dark mode">🌙</button>
         <h1>AlienXFile</h1>
         <p class="intro">Share files or text with a five-digit code. No account needed.</p>
         <noscript><p class="notice">JavaScript is required for uploads. Enable it and reload.</p></noscript>
@@ -63,9 +64,15 @@
             </fieldset>
 
             <div class="expire-section">
-                <label for="expire">Expire after:</label>
-                <select name="expire" id="expire">
-                    <option value="1h">1 Hour</option>
+                <label>Expire after:</label>
+                <div class="expire-presets" role="radiogroup" aria-label="Expiration time">
+                    <button type="button" class="preset-btn active" data-expire="1h" role="radio" aria-checked="true">1 Hour</button>
+                    <button type="button" class="preset-btn" data-expire="12h" role="radio" aria-checked="false">12 Hours</button>
+                    <button type="button" class="preset-btn" data-expire="24h" role="radio" aria-checked="false">1 Day</button>
+                    <button type="button" class="preset-btn" data-expire="72h" role="radio" aria-checked="false">3 Days</button>
+                </div>
+                <select name="expire" id="expire" hidden>
+                    <option value="1h" selected>1 Hour</option>
                     <option value="12h">12 Hours</option>
                     <option value="24h">1 Day</option>
                     <option value="72h">3 Days</option>
@@ -92,6 +99,16 @@
                     <p class="notice" id="storageWarning" role="status" hidden>Third-party storage. Avoid sensitive files.</p>
                     <p class="notice" id="storageHostingNote">Provider may reject large files even below the limit.</p>
                 </fieldset>
+                <div class="password-section">
+                    <label for="sharePassword">Password protection (optional)</label>
+                    <input type="password" id="sharePassword" name="sharePassword" placeholder="Leave empty for no password" autocomplete="new-password">
+                    <p class="notice">Encrypts content client-side. Password never leaves your browser.</p>
+                </div>
+                <div class="custom-code-section">
+                    <label for="customCode">Custom code (optional)</label>
+                    <input type="text" id="customCode" name="customCode" pattern="[0-9]{5}" maxlength="5" placeholder="00000" inputmode="numeric">
+                    <p class="notice">5 digits. Leave empty for random code.</p>
+                </div>
                 <label for="fileInput" id="fileInputLabel">
                     <span id="fileInputText">Drop files here or click to browse</span>
                     <small>Each file uploads separately.</small>
@@ -99,6 +116,7 @@
                 <input type="file" name="file" id="fileInput" multiple required aria-describedby="fileLimits" />
                 <p class="notice" id="fileLimits" aria-live="polite">Up to {{ upload_limit_label }} per file ({{ upload_max_bytes }} bytes).</p>
                 <p class="notice">Blocked: {{ banned_exts | join(', ') }}.</p>
+                <p class="notice paste-hint" id="pasteHint">💡 You can also paste images from clipboard (Ctrl+V)</p>
                 <ul id="selectedFiles" aria-label="Selected files"></ul>
             </div>
 
@@ -106,6 +124,10 @@
                 <label for="textInput">Text to share</label>
                 <textarea name="text" id="textInput" placeholder="Paste or type text..." disabled aria-describedby="textLimit"></textarea>
                 <p class="notice" id="textLimit">Max {{ max_text_length }} characters.</p>
+                <div class="url-preview" id="urlPreview" hidden>
+                    <h4 class="url-preview-title" id="urlPreviewTitle"></h4>
+                    <p class="url-preview-desc" id="urlPreviewDesc"></p>
+                </div>
             </div>
 
             <button type="submit">Share Now</button>
@@ -118,6 +140,12 @@
         <progress id="uploadProgress" max="100" value="0" aria-label="Upload progress" hidden></progress>
         <p class="notice">Temporary sharing, not a backup. Anyone with a code or link can access the content until it expires.</p>
         <section id="result" aria-label="Upload results" hidden></section>
+
+        <div class="history-section" id="uploadHistory">
+            <h3 class="history-title">Recent Uploads</h3>
+            <div class="history-list" id="historyList"></div>
+            <button type="button" class="history-clear-btn" id="historyClear" hidden>Clear History</button>
+        </div>
 
         <hr class="divider">
         <a href="/download" class="download-cta">
@@ -228,6 +256,10 @@
         setTimeout(function() {
             document.getElementById('loadingScreen').classList.add('hidden');
         }, 1600);
+        if (localStorage.getItem('alienxfile_dark') === '1' ||
+            (!localStorage.getItem('alienxfile_dark') && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+            document.body.classList.add('dark');
+        }
     });
 </script>
 </body>
