@@ -56,12 +56,14 @@
             <fieldset id="uploadControls" disabled>
             <legend class="visually-hidden">Share files or text</legend>
 
-            <fieldset class="mode-switch">
+            <fieldset class="mode-switch mode-switch--three">
                 <legend class="visually-hidden">Share mode</legend>
                 <input type="radio" id="modeFile" name="mode" value="file" checked>
-                <label for="modeFile">File Upload</label>
+                <label for="modeFile">File</label>
+                <input type="radio" id="modeFolder" name="mode" value="folder">
+                <label for="modeFolder">Folder</label>
                 <input type="radio" id="modeText" name="mode" value="text">
-                <label for="modeText">Text Share</label>
+                <label for="modeText">Text</label>
             </fieldset>
 
             <div id="fileInputContainer">

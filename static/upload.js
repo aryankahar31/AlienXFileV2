@@ -258,13 +258,22 @@ textInput.addEventListener("input", () => {
 // Core: Mode switching, file validation, file list update
 // ══════════════════════════════════════════════════════════════════════════════
 function switchMode() {
-    const isFile = form.elements.mode.value === "file";
+    const mode = form.elements.mode.value;
+    const isFile = mode === "file" || mode === "folder";
     fileInputContainer.hidden = !isFile;
     textInputContainer.hidden = isFile;
     fileInput.disabled = !isFile;
     fileInput.required = isFile;
     textInput.disabled = isFile;
     textInput.required = !isFile;
+    if (mode === "folder") {
+        fileInput.setAttribute("webkitdirectory", "");
+        fileInput.removeAttribute("directory");
+        fileInputText.textContent = "Select a folder to upload";
+    } else {
+        fileInput.removeAttribute("webkitdirectory");
+        fileInputText.textContent = "Drop files here or click to browse";
+    }
 }
 
 function fileError(file, storageProvider) {
@@ -314,9 +323,14 @@ function updateFiles() {
         : "Drop files here or click to browse";
 }
 
-form.querySelectorAll('input[name="mode"]').forEach(radio => radio.addEventListener("change", switchMode));
+form.querySelectorAll('input[name="mode"]').forEach(radio => radio.addEventListener("change", () => {
+    switchMode();
+    fileInput.value = "";
+    updateFiles();
+}));
 form.addEventListener("reset", () => requestAnimationFrame(() => {
     switchMode();
+    fileInput.value = "";
     updateFiles();
 }));
 fileInput.addEventListener("change", updateFiles);
