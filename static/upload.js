@@ -662,7 +662,7 @@ form.addEventListener("submit", async event => {
         return;
     }
 
-    const queue = mode === "file" ? Array.from(fileInput.files) : [null];
+    const queue = (mode === "file" || mode === "folder") ? Array.from(fileInput.files) : [null];
     busy = true;
     cancelled = false;
     controls.disabled = true;
@@ -706,7 +706,7 @@ form.addEventListener("submit", async event => {
                     const data = new FormData();
                     data.append("mode", mode);
                     data.append("expire", expire);
-                    if (mode === "file") data.append("storageProvider", storageProvider);
+                    if (mode === "file" || mode === "folder") data.append("storageProvider", storageProvider);
                     if (customKey) data.append("customKey", customKey);
 
                     if (mode === "text") {
