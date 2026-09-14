@@ -52,6 +52,7 @@
               data-max-bytes="{{ upload_max_bytes }}" data-limit-label="{{ upload_limit_label }}"
               data-litterbox-max-bytes="{{ litterbox_max_bytes }}"
               data-max-text-length="{{ max_text_length }}">
+            <input type="hidden" name="storageProvider" id="storageProvider" value="vercel">
             <fieldset id="uploadControls" disabled>
             <legend class="visually-hidden">Share files or text</legend>
 
@@ -62,6 +63,29 @@
                 <input type="radio" id="modeText" name="mode" value="text">
                 <label for="modeText">Text Share</label>
             </fieldset>
+
+            <div id="fileInputContainer">
+                <label for="fileInput" id="fileInputLabel">
+                    <span id="fileInputText">Drop files here or click to browse</span>
+                    <small>Up to 95 MB directly. Larger files use temporary storage automatically.</small>
+                </label>
+                <input type="file" name="file" id="fileInput" multiple required aria-describedby="fileLimits" />
+                <p class="notice" id="fileLimits" aria-live="polite">Up to {{ upload_limit_label }} per file.</p>
+                <p class="notice">Blocked: {{ banned_exts | join(', ') }}.</p>
+                <p class="notice paste-hint" id="pasteHint">You can also paste images from clipboard (Ctrl+V)</p>
+                <p class="notice" id="storageNote" hidden>Large file detected. It will be uploaded to temporary third-party storage.</p>
+                <ul id="selectedFiles" aria-label="Selected files"></ul>
+            </div>
+
+            <div id="textInputContainer" hidden>
+                <label for="textInput">Text to share</label>
+                <textarea name="text" id="textInput" placeholder="Paste or type text..." disabled aria-describedby="textLimit"></textarea>
+                <p class="notice" id="textLimit">Max {{ max_text_length }} characters.</p>
+                <div class="url-preview" id="urlPreview" hidden>
+                    <h4 class="url-preview-title" id="urlPreviewTitle"></h4>
+                    <p class="url-preview-desc" id="urlPreviewDesc"></p>
+                </div>
+            </div>
 
             <div class="expire-section">
                 <label>Expire after:</label>
@@ -79,56 +103,21 @@
                 </select>
             </div>
 
-            <div id="fileInputContainer">
-                <fieldset id="storageOptions" class="storage-options" aria-describedby="storageWarning storageHostingNote">
-                    <legend>Storage</legend>
-                    <label class="storage-option">
-                        <input type="radio" name="storageProvider" value="vercel" checked>
-                        <span>
-                            <strong>AlienXFile Storage</strong> <span class="storage-badge storage-badge--rec">Recommended</span>
-                            <small>Up to {{ upload_limit_label }} per file. Best for normal files.</small>
-                        </span>
-                    </label>
-                    <label class="storage-option">
-                        <input type="radio" name="storageProvider" value="litterbox">
-                        <span>
-                            <strong>Litterbox</strong> <span class="storage-badge storage-badge--large">Large Files</span>
-                            <small>Up to ~1 GB. Third-party temporary storage.</small>
-                        </span>
-                    </label>
-                    <p class="notice" id="storageWarning" role="status" hidden>Third-party storage. Avoid sensitive files.</p>
-                    <p class="notice" id="storageHostingNote">Provider may reject large files even below the limit.</p>
-                </fieldset>
-                <div class="password-section">
-                    <label for="sharePassword">Password protection (optional)</label>
-                    <input type="password" id="sharePassword" name="sharePassword" placeholder="Leave empty for no password" autocomplete="new-password">
-                    <p class="notice">Encrypts content client-side. Password never leaves your browser.</p>
+            <details class="advanced-section">
+                <summary>Advanced options</summary>
+                <div class="advanced-inner">
+                    <div class="password-section">
+                        <label for="sharePassword">Password protection (optional)</label>
+                        <input type="password" id="sharePassword" name="sharePassword" placeholder="Leave empty for no password" autocomplete="new-password">
+                        <p class="notice">Encrypts content in your browser. Password never leaves your device.</p>
+                    </div>
+                    <div class="custom-code-section">
+                        <label for="customCode">Custom code (optional)</label>
+                        <input type="text" id="customCode" name="customCode" pattern="[0-9]{5}" maxlength="5" placeholder="00000" inputmode="numeric">
+                        <p class="notice">5 digits. Leave empty for random code.</p>
+                    </div>
                 </div>
-                <div class="custom-code-section">
-                    <label for="customCode">Custom code (optional)</label>
-                    <input type="text" id="customCode" name="customCode" pattern="[0-9]{5}" maxlength="5" placeholder="00000" inputmode="numeric">
-                    <p class="notice">5 digits. Leave empty for random code.</p>
-                </div>
-                <label for="fileInput" id="fileInputLabel">
-                    <span id="fileInputText">Drop files here or click to browse</span>
-                    <small>Each file uploads separately.</small>
-                </label>
-                <input type="file" name="file" id="fileInput" multiple required aria-describedby="fileLimits" />
-                <p class="notice" id="fileLimits" aria-live="polite">Up to {{ upload_limit_label }} per file ({{ upload_max_bytes }} bytes).</p>
-                <p class="notice">Blocked: {{ banned_exts | join(', ') }}.</p>
-                <p class="notice paste-hint" id="pasteHint">💡 You can also paste images from clipboard (Ctrl+V)</p>
-                <ul id="selectedFiles" aria-label="Selected files"></ul>
-            </div>
-
-            <div id="textInputContainer" hidden>
-                <label for="textInput">Text to share</label>
-                <textarea name="text" id="textInput" placeholder="Paste or type text..." disabled aria-describedby="textLimit"></textarea>
-                <p class="notice" id="textLimit">Max {{ max_text_length }} characters.</p>
-                <div class="url-preview" id="urlPreview" hidden>
-                    <h4 class="url-preview-title" id="urlPreviewTitle"></h4>
-                    <p class="url-preview-desc" id="urlPreviewDesc"></p>
-                </div>
-            </div>
+            </details>
 
             <button type="submit">Share Now</button>
             </fieldset>

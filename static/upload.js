@@ -12,7 +12,8 @@ const progress = document.getElementById("uploadProgress");
 const cancel = document.getElementById("cancelUpload");
 const result = document.getElementById("result");
 const expireSelect = document.getElementById("expire");
-const storageOptions = document.getElementById("storageOptions");
+const storageProviderInput = document.getElementById("storageProvider");
+const storageNote = document.getElementById("storageNote");
 const fileInputContainer = document.getElementById("fileInputContainer");
 const textInputContainer = document.getElementById("textInputContainer");
 const selectedFiles = document.getElementById("selectedFiles");
@@ -200,15 +201,16 @@ fileLabel.addEventListener("dragleave", (e) => {
         fileLabel.classList.remove("dragover");
         fileInputText.textContent = fileInput.files.length
             ? `${fileInput.files.length} file(s) selected. Choose again to replace.`
-            : "Choose files or drag here";
+            : "Drop files here or click to browse";
     }
+    fileLabel.classList.add("dragover");
 });
 
 fileLabel.addEventListener("drop", (e) => {
     e.preventDefault();
     dragCounter = 0;
     fileLabel.classList.remove("dragover");
-    fileInputText.textContent = "Choose files or drag here";
+    fileInputText.textContent = "Drop files here or click to browse";
     if (busy || fileInput.disabled) return;
     fileInput.files = e.dataTransfer.files;
     updateFiles();
@@ -259,18 +261,17 @@ function switchMode() {
     const isFile = form.elements.mode.value === "file";
     fileInputContainer.hidden = !isFile;
     textInputContainer.hidden = isFile;
-    storageOptions.disabled = !isFile;
     fileInput.disabled = !isFile;
     fileInput.required = isFile;
     textInput.disabled = isFile;
     textInput.required = !isFile;
 }
 
-function fileError(file, storageProvider = form.elements.storageProvider.value) {
+function fileError(file, storageProvider) {
     if (storageProvider === "litterbox") {
-        if (file.size > litterboxMaxBytes) return "This file exceeds Litterbox's 1 GB per-file limit.";
+        if (file.size > litterboxMaxBytes) return "This file exceeds the 1 GB per-file limit.";
     } else if (file.size > maxBytes) {
-        return `This file exceeds AlienXFile Storage's ${form.dataset.limitLabel} limit. Choose Litterbox Large Files to upload it.`;
+        return `This file exceeds the ${form.dataset.limitLabel} limit.`;
     }
     if (bannedExts.some(ext => file.name.toLowerCase().endsWith(ext))) return "This file extension is blocked.";
     return "";
@@ -282,26 +283,38 @@ function formatSize(bytes) {
     return (bytes / 1048576).toFixed(1) + " MB";
 }
 
+function getStorageProvider(file) {
+    if (file && file.size > maxBytes) return "litterbox";
+    return "vercel";
+}
+
 function updateFiles() {
-    const isLitterbox = form.elements.storageProvider.value === "litterbox";
-    document.getElementById("fileLimits").textContent = isLitterbox
-        ? `Litterbox: up to approximately 1 GB per file (${litterboxMaxBytes.toLocaleString()} bytes). Hosting or the provider may reject large files.`
-        : `AlienXFile Storage: up to ${form.dataset.limitLabel} per file (${maxBytes.toLocaleString()} bytes).`;
-    document.getElementById("storageWarning").hidden = !isLitterbox;
+    const isFileMode = form.elements.mode.value === "file";
+    let needsLitterbox = false;
+    if (isFileMode && fileInput.files.length) {
+        for (const file of fileInput.files) {
+            if (file.size > maxBytes) { needsLitterbox = true; break; }
+        }
+    }
+    storageProviderInput.value = needsLitterbox ? "litterbox" : "vercel";
+    if (storageNote) storageNote.hidden = !needsLitterbox;
+    document.getElementById("fileLimits").textContent = needsLitterbox
+        ? `Large file detected. Using temporary third-party storage (~1 GB limit).`
+        : `Up to ${form.dataset.limitLabel} per file.`;
     selectedFiles.replaceChildren();
     for (const file of fileInput.files) {
         const item = document.createElement("li");
-        const error = fileError(file);
+        const sp = getStorageProvider(file);
+        const error = fileError(file, sp);
         item.textContent = `${file.name} (${formatSize(file.size)})${error ? ` - ${error}` : ""}`;
         selectedFiles.append(item);
     }
     fileInputText.textContent = fileInput.files.length
         ? `${fileInput.files.length} file(s) selected. Choose again to replace.`
-        : "Choose files or drag here";
+        : "Drop files here or click to browse";
 }
 
 form.querySelectorAll('input[name="mode"]').forEach(radio => radio.addEventListener("change", switchMode));
-form.querySelectorAll('input[name="storageProvider"]').forEach(radio => radio.addEventListener("change", updateFiles));
 form.addEventListener("reset", () => requestAnimationFrame(() => {
     switchMode();
     updateFiles();
