@@ -441,6 +441,21 @@ button[type="submit"]:active { transform: translate(2px, 2px); box-shadow: 1px 1
 /* ========== COPY FALLBACK ========== */
 .copy-fallback { width: 100%; min-height: 44px; }
 
+/* ========== FOLDER FILE LIST ========== */
+.folder-files {
+    margin: 0 0 16px; border: var(--border-light); border-radius: var(--radius);
+    background: #fafafa; overflow: hidden;
+}
+.folder-file {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 14px; border-bottom: 1px solid #eee; font-size: 14px;
+}
+.folder-file:last-child { border-bottom: 0; }
+.folder-file-name { font-weight: 600; overflow: anywhere; flex: 1; min-width: 0; margin-right: 12px; }
+.folder-file-size { color: #888; font-size: 13px; white-space: nowrap; flex-shrink: 0; }
+body.dark .folder-files { background: #0d1117; }
+body.dark .folder-file { border-bottom-color: #21262d; }
+
 /* ========== RESULT LINKS ========== */
 .result-links { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
 .result-links a { display: inline-flex; align-items: center; }

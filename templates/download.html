@@ -216,6 +216,20 @@
                     <p class="privacy">Third-party storage. Availability may end before expiry.</p>
                 {% endif %}
                 <a class="button" href="{{ share.link }}">Download</a>
+            {% elif share.type == 'folder' %}
+                <h2>{{ share.files|length }} file{{ 's' if share.files|length != 1 }}</h2>
+                <div class="folder-files">
+                {% for file in share.files %}
+                    <div class="folder-file">
+                        <span class="folder-file-name">{{ file.name }}</span>
+                        <span class="folder-file-size">{{ file.size|filesizeformat }}</span>
+                        <a class="button secondary" href="{{ url_for('download_folder_file', key=share.key, index=loop.index0) }}" style="margin-left:8px;min-height:auto;padding:6px 12px;font-size:12px;">Download</a>
+                    </div>
+                {% endfor %}
+                </div>
+                {% if share.files|length > 1 %}
+                <a class="button" href="{{ url_for('download_folder_zip', key=share.key) }}">Download All as ZIP</a>
+                {% endif %}
             {% elif share.type == 'text' %}
                 <div class="preview-toggle">
                     <button type="button" class="button secondary" id="togglePreview">Render Markdown</button>

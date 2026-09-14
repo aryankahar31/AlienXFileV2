@@ -1,5 +1,6 @@
 import html as html_mod
 import ipaddress
+import json
 import logging
 import os
 import re
@@ -269,6 +270,11 @@ def share_details(row):
             result['encrypted_url'] = row['url']
     else:
         result['is_encrypted'] = False
+    if row['type'] == 'folder' and row['content']:
+        try:
+            result['files'] = json.loads(row['content'])
+        except (json.JSONDecodeError, TypeError):
+            result['files'] = []
     return result
 
 
@@ -470,6 +476,78 @@ def upload():
     return jsonify(success=bool(uploads), uploads=uploads, errors=errors), 200 if uploads else 400
 
 
+@app.route('/upload-folder', methods=['POST'])
+def upload_folder():
+    """Upload multiple files as a single folder share with one code."""
+    expiry = request.form.get('expire', '1h')
+    custom_key = request.form.get('customKey', '').strip() or None
+    if custom_key and not re.fullmatch(r'[0-9]{5}', custom_key):
+        return error_response('Custom code must be exactly 5 digits.', 400)
+    if expiry not in expire_seconds:
+        return error_response('Choose a valid expiration.', 400)
+    if not app.config['BLOB_READ_WRITE_TOKEN']:
+        return error_response('AlienXFile Storage is temporarily unavailable.', 503)
+    files = request.files.getlist('file')
+    if not files or len(files) > 50:
+        return error_response('Select between 1 and 50 files.', 400)
+    expires = time.time() + expire_seconds[expiry]
+    file_list = []
+    blobs_to_clean = []
+    for file in files:
+        filename = secure_filename(file.filename or '')
+        if not filename or len(filename) > 255:
+            continue
+        if Path(filename).suffix.lower() in banned_exts:
+            continue
+        try:
+            file.stream.seek(0, 2)
+            size = file.stream.tell()
+            file.stream.seek(0)
+            if size > app.config['UPLOAD_MAX_BYTES']:
+                continue
+            with requests.put(BLOB_API + '/',
+                              params={'pathname': f'shares/{secrets.token_hex(16)}/{filename}'},
+                              data=file.stream if size else b'', headers={
+                                  **blob_headers(), 'Content-Length': str(size),
+                                  'Content-Type': 'application/octet-stream',
+                                  'x-content-type': 'application/octet-stream',
+                                  'x-vercel-blob-access': 'private', 'x-add-random-suffix': '0',
+                                  'x-allow-overwrite': '0', 'x-cache-control-max-age': '60',
+                              }, timeout=(10, 180), allow_redirects=False) as response:
+                response.raise_for_status()
+                result = response.json()
+                if not 200 <= response.status_code < 300 or not isinstance(result, dict):
+                    raise ValueError('Invalid storage response.')
+                link = checked_blob_url(result.get('url'))
+                blobs_to_clean.append(link)
+                file_list.append({'name': filename, 'url': link, 'size': size})
+        except (requests.RequestException, ValueError, OSError):
+            continue
+    if not file_list:
+        return error_response('No files were uploaded successfully.', 400)
+    total_size = sum(f['size'] for f in file_list)
+    folder_name = f'{len(file_list)} files'
+    content_json = json.dumps(file_list)
+    try:
+        shared = save_share('folder', folder_name, total_size, expires, content=content_json,
+                            custom_key=custom_key, provider='vercel')
+        if shared is None:
+            if blobs_to_clean:
+                try:
+                    delete_blobs(blobs_to_clean)
+                except (requests.RequestException, ValueError):
+                    pass
+            return error_response('That custom code is already taken.', 409)
+    except ValueError as exc:
+        if blobs_to_clean:
+            try:
+                delete_blobs(blobs_to_clean)
+            except (requests.RequestException, ValueError):
+                pass
+        return error_response(str(exc), 503)
+    return jsonify(success=True, uploads=[shared], errors=[])
+
+
 @app.route('/upload-litterbox', methods=['POST'])
 def upload_litterbox():
     """Accept a pre-uploaded Litterbox URL from the browser (direct upload path)."""
@@ -583,6 +661,77 @@ def bulk_download():
     zip_buf.seek(0)
     return Response(zip_buf.getvalue(), mimetype='application/zip',
                     headers={'Content-Disposition': f'attachment; filename="alienxfile-{found}-files.zip"'})
+
+
+@app.route('/download-folder/<key>/<int:index>')
+def download_folder_file(key, index):
+    """Stream a single file from a folder share by index."""
+    if not re.fullmatch(r'[0-9]{5}', key):
+        return error_response('Invalid code.', 404)
+    db = get_db()
+    row = query(db, 'SELECT * FROM shares WHERE key = ?', (key,)).fetchone()
+    if not row or row['type'] != 'folder':
+        return error_response('Invalid folder share.', 404)
+    if row['expires'] <= time.time():
+        cleanup_expired(db)
+        return error_response('This share has expired.', 410)
+    try:
+        files = json.loads(row['content'])
+    except (json.JSONDecodeError, TypeError):
+        return error_response('Folder data is corrupt.', 500)
+    if index < 0 or index >= len(files):
+        return error_response('Invalid file index.', 404)
+    file_info = files[index]
+    try:
+        resp = requests.get(file_info['url'],
+                            headers={'Authorization': blob_headers()['Authorization'], 'Accept-Encoding': 'identity'},
+                            stream=True, timeout=(10, 60), allow_redirects=False)
+    except (requests.RequestException, ValueError):
+        return error_response('File storage is temporarily unavailable.', 502)
+    if resp.status_code != 200:
+        resp.close()
+        return error_response('File is unavailable.', 502)
+    response = Response(resp.iter_content(chunk_size=64 * 1024), content_type='application/octet-stream')
+    response.headers.set('Content-Disposition', 'attachment', filename=secure_filename(file_info['name']) or 'download')
+    response.headers['Content-Length'] = str(file_info.get('size', 0))
+    response.call_on_close(resp.close)
+    return response
+
+
+@app.route('/download-folder-zip/<key>')
+def download_folder_zip(key):
+    """Download all files in a folder share as a ZIP."""
+    if not re.fullmatch(r'[0-9]{5}', key):
+        return error_response('Invalid code.', 404)
+    db = get_db()
+    row = query(db, 'SELECT * FROM shares WHERE key = ?', (key,)).fetchone()
+    if not row or row['type'] != 'folder':
+        return error_response('Invalid folder share.', 404)
+    if row['expires'] <= time.time():
+        cleanup_expired(db)
+        return error_response('This share has expired.', 410)
+    try:
+        files = json.loads(row['content'])
+    except (json.JSONDecodeError, TypeError):
+        return error_response('Folder data is corrupt.', 500)
+    zip_buf = BytesIO()
+    found = 0
+    with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for file_info in files:
+            try:
+                resp = requests.get(file_info['url'],
+                                    headers={'Authorization': blob_headers()['Authorization'], 'Accept-Encoding': 'identity'},
+                                    timeout=(10, 60))
+                if resp.status_code == 200:
+                    zf.writestr(file_info['name'], resp.content)
+                    found += 1
+            except (requests.RequestException, ValueError):
+                continue
+    if not found:
+        return error_response('No files could be downloaded.', 500)
+    zip_buf.seek(0)
+    return Response(zip_buf.getvalue(), mimetype='application/zip',
+                    headers={'Content-Disposition': f'attachment; filename="{row["name"]}.zip"'})
 
 
 @app.route('/api/url-meta', methods=['POST'])

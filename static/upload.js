@@ -688,6 +688,42 @@ form.addEventListener("submit", async event => {
         failures++;
     };
     try {
+        if (mode === "folder" && queue.length > 0) {
+            const data = new FormData();
+            data.append("expire", expire);
+            if (customKey) data.append("customKey", customKey);
+            for (const file of queue) data.append("file", file, file.name);
+            progress.value = 0;
+            status.textContent = `Uploading ${queue.length} files as folder...`;
+            let xhr;
+            for (let attempt = 0; attempt < 3; attempt++) {
+                xhr = await uploadRequest(data, "folder upload", "/upload-folder");
+                if (xhr.status !== 429) break;
+                const retryAfter = parseInt(xhr.getResponseHeader("Retry-After") || "30", 10);
+                status.textContent = `Folder upload rate limited. Retrying in ${retryAfter}s...`;
+                await new Promise(r => setTimeout(r, retryAfter * 1000));
+            }
+            let response;
+            try {
+                response = JSON.parse(xhr.responseText);
+            } catch {
+                throw new Error("Server returned an unreadable response.");
+            }
+            if (!response || typeof response !== "object") throw new Error("Invalid server response.");
+            const uploads = Array.isArray(response.uploads) ? response.uploads : [];
+            const errors = Array.isArray(response.errors) ? response.errors.filter(e => typeof e === "string") : [];
+            if (typeof response.error === "string" && response.error) errors.push(response.error);
+            for (const upload of uploads) {
+                if (upload) {
+                    renderUpload(upload, batch);
+                    allKeys.push(upload.key);
+                    completed++;
+                    saveHistory({ key: upload.key, name: upload.name || "Folder", expires: upload.expires, timestamp: Date.now() });
+                }
+            }
+            for (const error of errors) addError(error);
+            if ((xhr.status < 200 || xhr.status >= 300) && !errors.length) addError("Folder upload failed.");
+        } else {
         for (const [index, file] of queue.entries()) {
             const name = file ? file.name : "Shared Text";
             if (cancelled) {
@@ -840,6 +876,7 @@ form.addEventListener("submit", async event => {
             } finally {
                 activeRequest = null;
             }
+        }
         }
     } finally {
         summary.textContent = `${completed} uploaded; ${failures} error(s).${cancelled ? " Queue cancelled. The server might already finish the active item." : ""}`;
