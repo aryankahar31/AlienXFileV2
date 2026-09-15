@@ -50,7 +50,7 @@ class DownloadTest(unittest.TestCase):
         self.addCleanup(contexts.close)
         contexts.enter_context(patch.dict(app.config, TESTING=True, DATABASE=self.database, DATABASE_URL=None, BLOB_READ_WRITE_TOKEN='',
                                      INDEXNOW_KEY='',
-                                     UPLOAD_MAX_BYTES=95_000_000, LITTERBOX_MAX_BYTES=1_000_000_000,
+                                     UPLOAD_MAX_BYTES=1_000_000_000, LITTERBOX_MAX_BYTES=1_000_000_000,
                                      MAX_CONTENT_LENGTH=1_001_000_000,
                                      UPLOAD_RATE_LIMIT=1000, LOOKUP_RATE_LIMIT=1000,
                                      RATE_WINDOW_SECONDS=60, TRUST_PYTHONANYWHERE_PROXY=False, TRUST_RENDER_PROXY=False))
@@ -483,12 +483,12 @@ class DownloadTest(unittest.TestCase):
             put.assert_not_called()
         self.post.assert_not_called()
 
-    def test_vercel_limit_message_uses_decimal_95_mb_and_suggests_litterbox(self):
+    def test_vercel_limit_message_uses_decimal_1_gb_and_suggests_litterbox(self):
         # Report a large parsed-file size without allocating or sending a large body.
         stream = BytesIO()
         with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN), \
                 patch('flask.wrappers.Request._get_file_stream', return_value=stream), \
-                patch.object(stream, 'tell', return_value=95_000_001), \
+                patch.object(stream, 'tell', return_value=1_000_000_001), \
                 patch('flask_app.requests.put') as put:
             response = self.client.post('/upload', data={
                 'storageProvider': 'vercel', 'file': (BytesIO(b'x'), 'large.txt'),
@@ -497,7 +497,7 @@ class DownloadTest(unittest.TestCase):
             self.assertFalse(response.get_json()['success'])
             self.assertEqual(response.get_json()['uploads'], [])
             error, = response.get_json()['errors']
-            self.assertIn('95 MB', error)
+            self.assertIn('1 GB', error)
             self.assertIn('Litterbox', error)
             put.assert_not_called()
         self.post.assert_not_called()
@@ -507,7 +507,7 @@ class DownloadTest(unittest.TestCase):
     def test_default_provider_limits_leave_room_for_litterbox_requests(self):
         result = subprocess.run([sys.executable, '-B', '-c', '''
 from flask_app import app
-assert app.config['UPLOAD_MAX_BYTES'] == 95_000_000
+assert app.config['UPLOAD_MAX_BYTES'] == 1_000_000_000
 assert app.config['LITTERBOX_MAX_BYTES'] == 1_000_000_000
 assert app.config['MAX_CONTENT_LENGTH'] == 1_001_000_000
 '''], cwd=Path(__file__).resolve().parent,

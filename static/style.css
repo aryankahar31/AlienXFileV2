@@ -744,6 +744,13 @@ body.dark .markdown-preview a { color: var(--cyan); }
 
 /* ========== DOWNLOAD PAGE BOX (dark) ========== */
 body.dark .box { background: #161b22; }
+body.dark .error-msg { background: #2d1215; color: var(--pink); border-color: var(--pink); }
+body.dark .metadata { background: #161b22; border-color: #30363d; }
+body.dark .metadata dt { color: #8b949e; }
+body.dark .key { background: #0d1117; }
+body.dark #textContent { background: #0d1117; color: var(--black); }
+body.dark .help { color: #8b949e; }
+body.dark .privacy { color: #8b949e; }
 
 /* ========== RESPONSIVE ========== */
 @media (max-width: 600px) {

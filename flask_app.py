@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import secrets
+import socket
 import sqlite3
 import time
 import zipfile
@@ -29,9 +30,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 MAX_FILE_BYTES = 1_000_000_000  # 1 GB, decimal, plus separate multipart overhead below.
-upload_max_bytes = int(os.environ.get('ALIENX_UPLOAD_MAX_BYTES', 95_000_000))
-if not 0 < upload_max_bytes <= 95_000_000:
-    raise ValueError('ALIENX_UPLOAD_MAX_BYTES must be between 1 and 95000000 for AlienXFile Storage.')
+MAX_ZIP_TOTAL_BYTES = 500_000_000  # 500 MB total for ZIP downloads
+upload_max_bytes = int(os.environ.get('ALIENX_UPLOAD_MAX_BYTES', 1_000_000_000))
+if not 0 < upload_max_bytes <= 1_000_000_000:
+    raise ValueError('ALIENX_UPLOAD_MAX_BYTES must be between 1 and 1000000000 for AlienXFile Storage.')
 app.config.update(
     DATABASE=os.environ.get('ALIENX_DATABASE', str(Path(__file__).with_name('shares.sqlite3'))),
     DATABASE_URL=os.environ.get('DATABASE_URL'),
@@ -158,6 +160,19 @@ def checked_blob_url(url):
     return url
 
 
+def _is_private_host(hostname):
+    """Return True if hostname resolves to a loopback/private/reserved IP."""
+    try:
+        infos = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        for _, _, _, _, sockaddr in infos:
+            ip = ipaddress.ip_address(sockaddr[0])
+            if ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_link_local:
+                return True
+    except (socket.gaierror, ValueError):
+        return True
+    return False
+
+
 def delete_blobs(urls):
     with requests.post(BLOB_API + '/delete', headers=blob_headers(),
                        json={'urls': [checked_blob_url(url) for url in urls]},
@@ -188,16 +203,17 @@ def cleanup_shares():
 
 
 def error_response(message, status):
-    if request.path in ('/upload', '/upload-litterbox', '/bulk-download', '/api/url-meta'):
+    if request.path in ('/upload', '/upload-folder', '/upload-litterbox', '/bulk-download', '/api/url-meta'):
         return jsonify(success=False, uploads=[], errors=[], error=message), status
     return render_template('download.html', error=message), status
 
 
 @app.before_request
 def limit_requests():
-    if request.endpoint == 'upload':
+    if request.endpoint in {'upload', 'upload_folder', 'upload_litterbox'}:
         action, limit = 'upload', app.config['UPLOAD_RATE_LIMIT']
-    elif request.endpoint in {'download_details', 'download_direct', 'share_qr'} or (
+    elif request.endpoint in {'download_details', 'download_direct', 'share_qr',
+                              'bulk_download', 'download_folder_file', 'download_folder_zip'} or (
         request.endpoint == 'download_page' and request.method == 'POST'
     ):
         action, limit = 'lookup', app.config['LOOKUP_RATE_LIMIT']
@@ -493,6 +509,7 @@ def upload_folder():
     expires = time.time() + expire_seconds[expiry]
     file_list = []
     blobs_to_clean = []
+    errors = []
     vercel_limit = app.config['UPLOAD_MAX_BYTES']
     litterbox_limit = min(app.config['LITTERBOX_MAX_BYTES'], MAX_FILE_BYTES)
     proxy_url = app.config.get('LITTERBOX_PROXY_URL', '')
@@ -500,14 +517,17 @@ def upload_folder():
     for file in files:
         filename = secure_filename(file.filename or '')
         if not filename or len(filename) > 255:
+            errors.append('A file has an empty or overly long filename.')
             continue
         if Path(filename).suffix.lower() in banned_exts:
+            errors.append(f'{filename}: This file extension is blocked.')
             continue
         try:
             file.stream.seek(0, 2)
             size = file.stream.tell()
             file.stream.seek(0)
             if size > litterbox_limit:
+                errors.append(f'{filename}: File too large for storage.')
                 continue
             if size <= vercel_limit:
                 with requests.put(BLOB_API + '/',
@@ -555,10 +575,12 @@ def upload_folder():
                 if not re.fullmatch(r'https://litter\.catbox\.moe/[A-Za-z0-9][A-Za-z0-9._-]*', link):
                     raise ValueError('Invalid storage link.')
                 file_list.append({'name': filename, 'url': link, 'size': size, 'provider': 'litterbox'})
-        except (requests.RequestException, ValueError, OSError):
+        except (requests.RequestException, ValueError, OSError) as exc:
+            errors.append(f'{filename}: Upload failed ({type(exc).__name__}).')
             continue
     if not file_list:
-        return error_response('No files were uploaded successfully.', 400)
+        detail = '; '.join(errors[:3]) if errors else 'No files were uploaded successfully.'
+        return error_response(detail, 400)
     total_size = sum(f['size'] for f in file_list)
     folder_name = f'{len(file_list)} files'
     content_json = json.dumps(file_list)
@@ -668,6 +690,7 @@ def bulk_download():
     db = get_db()
     zip_buf = BytesIO()
     found = 0
+    total_bytes = 0
     with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
         for key in keys:
             if not isinstance(key, str) or not re.fullmatch(r'[0-9]{5}', key):
@@ -679,14 +702,22 @@ def bulk_download():
                 if row['provider'] == 'litterbox':
                     resp = requests.get(row['url'], timeout=(10, 60))
                     if resp.status_code == 200:
-                        zf.writestr(row['name'], resp.content)
+                        content = resp.content
+                        total_bytes += len(content)
+                        if total_bytes > MAX_ZIP_TOTAL_BYTES:
+                            continue
+                        zf.writestr(row['name'], content)
                         found += 1
                 elif row['provider'] == 'vercel':
                     resp = requests.get(row['url'],
                                         headers={'Authorization': blob_headers()['Authorization'], 'Accept-Encoding': 'identity'},
                                         timeout=(10, 60))
                     if resp.status_code == 200:
-                        zf.writestr(row['name'], resp.content)
+                        content = resp.content
+                        total_bytes += len(content)
+                        if total_bytes > MAX_ZIP_TOTAL_BYTES:
+                            continue
+                        zf.writestr(row['name'], content)
                         found += 1
             except (requests.RequestException, ValueError):
                 continue
@@ -756,6 +787,7 @@ def download_folder_zip(key):
         return error_response('Folder data is corrupt.', 500)
     zip_buf = BytesIO()
     found = 0
+    total_bytes = 0
     with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
         for file_info in files:
             try:
@@ -766,7 +798,11 @@ def download_folder_zip(key):
                                         headers={'Authorization': blob_headers()['Authorization'], 'Accept-Encoding': 'identity'},
                                         timeout=(10, 60))
                 if resp.status_code == 200:
-                    zf.writestr(file_info['name'], resp.content)
+                    content = resp.content
+                    total_bytes += len(content)
+                    if total_bytes > MAX_ZIP_TOTAL_BYTES:
+                        continue
+                    zf.writestr(file_info['name'], content)
                     found += 1
             except (requests.RequestException, ValueError):
                 continue
@@ -785,6 +821,8 @@ def url_meta():
         return jsonify(error='Provide a valid URL.'), 400
     try:
         parsed = urlparse(url)
+        if parsed.hostname and _is_private_host(parsed.hostname):
+            return jsonify(error='Fetching private/internal URLs is not allowed.'), 403
         resp = requests.get(url, timeout=(5, 10), headers={
             'User-Agent': 'Mozilla/5.0 (compatible; AlienXFile/2.0)',
             'Accept': 'text/html',

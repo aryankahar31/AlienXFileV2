@@ -203,7 +203,6 @@ fileLabel.addEventListener("dragleave", (e) => {
             ? `${fileInput.files.length} file(s) selected. Choose again to replace.`
             : "Drop files here or click to browse";
     }
-    fileLabel.classList.add("dragover");
 });
 
 fileLabel.addEventListener("drop", (e) => {
@@ -838,7 +837,7 @@ form.addEventListener("submit", async event => {
                         throw new Error("Storage proxy returned an invalid URL.");
                     }
                     status.textContent = `${label}: file uploaded to storage. Saving share record...`;
-                    const savePayload = { url: litterboxUrl, name: file.name, size: file.size, expire };
+                    const savePayload = { url: litterboxUrl, name: file.name, size: file.size, expire, ...(customKey ? { customKey } : {}) };
                     if (litterboxEncrypted) {
                         savePayload.salt = litterboxSalt;
                         savePayload.iv = litterboxIv;

@@ -18,7 +18,7 @@ The progress bar measures browser-to-app transfer only. Reaching 100% does not m
 
 | Layer | Limit or constraint |
 | --- | --- |
-| AlienXFile Storage / Vercel | 95 MB, decimal: `95,000,000` bytes per file. `ALIENX_UPLOAD_MAX_BYTES` can lower this Vercel limit, not raise it. |
+| AlienXFile Storage / Vercel | 1 GB, decimal: `1,000,000,000` bytes per file. `ALIENX_UPLOAD_MAX_BYTES` can lower this Vercel limit, not raise it. |
 | Litterbox / application ceiling | 1 GB, decimal: `1,000,000,000` bytes per file. The [official homepage](https://litterbox.catbox.moe/) advertises up to 1 GB; this is not an end-to-end hosting guarantee. |
 | Flask HTTP request cap | `1,001,000,000` bytes (1 GB + 1 MB multipart overhead) for the whole request. Each file is still checked against its selected provider's limit. |
 
