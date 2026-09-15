@@ -225,7 +225,6 @@ const urlPreviewDesc = document.getElementById("urlPreviewDesc");
 async function fetchUrlMeta(url) {
     if (!urlPreviewEl || !url.match(/^https?:\/\//i)) return;
     urlPreviewEl.hidden = true;
-    if (!url.match(/^https?:\/\//i)) return;
     try {
         const resp = await fetch("/api/url-meta", {
             method: "POST",
@@ -265,9 +264,10 @@ function switchMode() {
     fileInput.required = isFile;
     textInput.disabled = isFile;
     textInput.required = !isFile;
+    const pasteHint = document.getElementById("pasteHint");
+    if (pasteHint) pasteHint.hidden = mode === "folder";
     if (mode === "folder") {
         fileInput.setAttribute("webkitdirectory", "");
-        fileInput.removeAttribute("directory");
         fileInputText.textContent = "Select a folder to upload";
     } else {
         fileInput.removeAttribute("webkitdirectory");

@@ -703,7 +703,7 @@ def bulk_download():
     total_bytes = 0
     with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
         for key in keys:
-            if not isinstance(key, str) or not re.fullmatch(r'[0-9]{5}', key):
+            if not isinstance(key, str) or not re.fullmatch(r'[A-Za-z0-9]{3,20}', key):
                 continue
             row = query(db, 'SELECT * FROM shares WHERE key = ?', (key,)).fetchone()
             if not row or row['type'] != 'file' or row['expires'] <= time.time():
@@ -741,7 +741,7 @@ def bulk_download():
 @app.route('/download-folder/<key>/<int:index>')
 def download_folder_file(key, index):
     """Stream a single file from a folder share by index."""
-    if not re.fullmatch(r'[0-9]{5}', key):
+    if not re.fullmatch(r'[A-Za-z0-9]{3,20}', key):
         return error_response('Invalid code.', 404)
     db = get_db()
     row = query(db, 'SELECT * FROM shares WHERE key = ?', (key,)).fetchone()
@@ -782,7 +782,7 @@ def download_folder_file(key, index):
 @app.route('/download-folder-zip/<key>')
 def download_folder_zip(key):
     """Download all files in a folder share as a ZIP."""
-    if not re.fullmatch(r'[0-9]{5}', key):
+    if not re.fullmatch(r'[A-Za-z0-9]{3,20}', key):
         return error_response('Invalid code.', 404)
     db = get_db()
     row = query(db, 'SELECT * FROM shares WHERE key = ?', (key,)).fetchone()

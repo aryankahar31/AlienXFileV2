@@ -4,7 +4,7 @@
 
 Temporary file and text sharing built with Flask, PostgreSQL (or SQLite for local/PythonAnywhere use), and private [Vercel Blob](https://vercel.com/docs/vercel-blob) storage. The responsive pages use HTML, CSS, and JavaScript, with no frontend build step. Users can manually choose Litterbox for larger files; AlienXFile Storage (Vercel Blob) remains the recommended default.
 
-- Share files or text using a five-digit code, including leading zeros, or a share link.
+- Share files or text using a short alphanumeric code or a share link.
 - Choose expiration after 1, 12, 24, or 72 hours.
 - Copy a link or scan a QR code generated locally by the app; no external QR service receives the link.
 - Select multiple files; the browser uploads them sequentially, with one file per `/upload` API request. Flask streams each file to the selected storage provider. The browser never calls Litterbox directly.
@@ -66,7 +66,7 @@ Local tests are not evidence that Render, PythonAnywhere, or Litterbox accepts a
 
 File requests to `/upload` use multipart fields `mode=file`, `storageProvider=vercel` or `storageProvider=litterbox`, the existing `expire` value, and `file`. Omitting `storageProvider` defaults to Vercel. Invalid providers are rejected; missing Blob credentials fail cleanly instead of silently switching providers. Text sharing ignores the provider and stays in the database.
 
-For Litterbox, the backend sends `reqtype=fileupload`, `time=1h|12h|24h|72h`, and `fileToUpload` to `https://litterbox.catbox.moe/resources/internals/api.php`. Responses must contain a valid HTTPS `litter.catbox.moe` file URL before a code is saved. HTTP 403, other upstream errors, and timeouts return a failed upload with a plain error message, never raw provider HTML or a false success. The same five-digit share system handles both providers.
+For Litterbox, the backend sends `reqtype=fileupload`, `time=1h|12h|24h|72h`, and `fileToUpload` to `https://litterbox.catbox.moe/resources/internals/api.php`. Responses must contain a valid HTTPS `litter.catbox.moe` file URL before a code is saved. HTTP 403, other upstream errors, and timeouts return a failed upload with a plain error message, never raw provider HTML or a false success. The same share system handles both providers, with automatic fallback from Vercel to Litterbox if needed.
 
 The size warning suggests Litterbox when a file exceeds the normal limit; it does not switch providers automatically or promise that the host/provider will accept the file. Litterbox is temporary third-party storage and should not receive sensitive files.
 
@@ -94,7 +94,7 @@ PostgreSQL schema initialization is explicit: `init-db` must succeed before work
 3. Create a **Private** Vercel Blob store in Singapore (`sin1`) on a Hobby account. Set its static read/write token in Render as `BLOB_READ_WRITE_TOKEN`. Do not put that token in browser code or use a public store. The app derives the allowed private hostname from the token, and never sends the token to arbitrary download URLs. Without this setting, Vercel uploads fail cleanly; Litterbox must still be explicitly selected.
 4. Before publishing, update the existing Render service settings to match the configuration: Free instance, `PYTHON_VERSION=3.14.3`, project-root working directory, the build/start commands above, and `ALIENX_UPLOAD_MAX_BYTES=95000000`. Confirm the region is Singapore; if changing it requires a replacement service, obtain authorization first. Render supplies `RENDER=true` and `RENDER_SERVICE_TYPE=web`. Disable automatic deploys while preparing settings so a repository update cannot publish prematurely. A Blueprint file does **not** automatically update an existing dashboard-configured service unless that service is managed by the Blueprint.
 5. Publish reviewed changes to the intended repository/branch and manually deploy the existing service. Confirm schema initialization succeeds before Gunicorn starts. No second web service, Render database, or paid resource is needed.
-6. Verify a small text share and a small file upload/download over HTTPS, five-digit lookup (including leading zeros), and QR links. Restart the service and confirm unexpired shares still work from Neon. Check rate limits from two different client IPs so clients do not all share the proxy's allowance; excess requests must return 429 with `Retry-After`. Inspect global security/cache headers on success and error responses without logging credentials or tokens. These smoke checks do not verify 95 MB or 1 GB transfers.
+6. Verify a small text share and a small file upload/download over HTTPS, code lookup, and QR links. Restart the service and confirm unexpired shares still work from Neon. Check rate limits from two different client IPs so clients do not all share the proxy's allowance; excess requests must return 429 with `Retry-After`. Inspect global security/cache headers on success and error responses without logging credentials or tokens. These smoke checks do not verify 95 MB or 1 GB transfers.
 
 ## PythonAnywhere Setup
 

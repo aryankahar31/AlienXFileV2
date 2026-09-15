@@ -665,7 +665,6 @@ body.dark .url-preview { background: #0d1117; border-color: #30363d; }
 body.dark .url-preview-title { color: var(--black); }
 body.dark .url-preview-desc { color: #8b949e; }
 
-body.dark #storageWarning { color: #d97706; }
 body.dark #storageNote { color: #d97706; }
 body.dark .error-item { color: var(--pink); }
 
