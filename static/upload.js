@@ -652,8 +652,8 @@ form.addEventListener("submit", async event => {
         textInput.focus();
         return;
     }
-    if (customKey && !/^\d{5}$/.test(customKey)) {
-        status.textContent = "Custom code must be exactly 5 digits.";
+    if (customKey && !/^[A-Za-z0-9]{3,20}$/.test(customKey)) {
+        status.textContent = "Custom code must be 3-20 letters or numbers.";
         customKeyInput.focus();
         return;
     }

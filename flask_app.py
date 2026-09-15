@@ -362,8 +362,8 @@ def upload():
     mode = request.form.get('mode', 'file')
     expiry = request.form.get('expire', '1h')
     custom_key = request.form.get('customKey', '').strip() or None
-    if custom_key and not re.fullmatch(r'[0-9]{5}', custom_key):
-        return error_response('Custom code must be exactly 5 digits.', 400)
+    if custom_key and not re.fullmatch(r'[A-Za-z0-9]{3,20}', custom_key):
+        return error_response('Custom code must be 3-20 letters or numbers.', 400)
     is_encrypted = request.form.get('isEncrypted') == '1'
     salt = request.form.get('salt') or None
     iv_val = request.form.get('iv') or None
@@ -395,7 +395,8 @@ def upload():
         return error_response('Select between 1 and 10 files per request.', 400)
     if provider == 'vercel' and not app.config['BLOB_READ_WRITE_TOKEN']:
         return error_response('AlienXFile Storage is temporarily unavailable. Please try again later.', 503)
-    limit = app.config['UPLOAD_MAX_BYTES'] if provider == 'vercel' else min(app.config['LITTERBOX_MAX_BYTES'], MAX_FILE_BYTES)
+    vercel_limit = app.config['UPLOAD_MAX_BYTES']
+    litterbox_limit = min(app.config['LITTERBOX_MAX_BYTES'], MAX_FILE_BYTES)
     uploads, errors = [], []
     for file in files:
         filename = secure_filename(file.filename or '')
@@ -406,37 +407,46 @@ def upload():
             errors.append(f'{filename}: This file extension is blocked.')
             continue
         stored_blob = None
+        link = None
+        actual_provider = provider
         try:
             file.stream.seek(0, 2)
             size = file.stream.tell()
             file.stream.seek(0)
-            if size > limit:
-                message = (f"This file exceeds AlienXFile Storage's {template_settings()['upload_limit_label']} limit. "
-                           'Choose Litterbox Large Files to upload it.' if provider == 'vercel'
-                           else "This file exceeds Litterbox's 1 GB limit.")
-                errors.append(f'{filename}: {message}')
+            if size > litterbox_limit:
+                errors.append(f'{filename}: File too large for storage (max 1 GB).')
                 continue
             expires = time.time() + expire_seconds[expiry]
-            if provider == 'vercel':
-                with requests.put(BLOB_API + '/',
-                                  params={'pathname': f'shares/{secrets.token_hex(16)}/{filename}'},
-                                  data=file.stream if size else b'', headers={
-                                      **blob_headers(), 'Content-Length': str(size),
-                                      'Content-Type': 'application/octet-stream',
-                                      'x-content-type': 'application/octet-stream',
-                                      'x-vercel-blob-access': 'private', 'x-add-random-suffix': '0',
-                                      'x-allow-overwrite': '0', 'x-cache-control-max-age': '60',
-                                  }, timeout=(10, 180), allow_redirects=False) as response:
-                    response.raise_for_status()
-                    result = response.json()
-                    if not 200 <= response.status_code < 300 or not isinstance(result, dict):
-                        raise ValueError('Invalid private storage response.')
-                    stored_blob = link = checked_blob_url(result.get('url'))
-            else:
+            if provider == 'vercel' and size <= vercel_limit:
+                try:
+                    with requests.put(BLOB_API + '/',
+                                      params={'pathname': f'shares/{secrets.token_hex(16)}/{filename}'},
+                                      data=file.stream if size else b'', headers={
+                                          **blob_headers(), 'Content-Length': str(size),
+                                          'Content-Type': 'application/octet-stream',
+                                          'x-content-type': 'application/octet-stream',
+                                          'x-vercel-blob-access': 'private', 'x-add-random-suffix': '0',
+                                          'x-allow-overwrite': '0', 'x-cache-control-max-age': '60',
+                                      }, timeout=(10, 180), allow_redirects=False) as response:
+                        response.raise_for_status()
+                        result = response.json()
+                        if not 200 <= response.status_code < 300 or not isinstance(result, dict):
+                            raise ValueError('Invalid private storage response.')
+                        stored_blob = link = checked_blob_url(result.get('url'))
+                except (requests.RequestException, ValueError) as exc:
+                    logger.warning('Vercel upload failed (%s), falling back to Litterbox', type(exc).__name__)
+                    if stored_blob:
+                        try:
+                            delete_blobs([stored_blob])
+                        except (requests.RequestException, ValueError):
+                            logger.warning('Vercel blob cleanup failed during fallback')
+                        stored_blob = None
+                    file.stream.seek(0)
+                    actual_provider = 'litterbox'
+            if link is None:
                 proxy_url = app.config.get('LITTERBOX_PROXY_URL', '')
                 proxy_secret = app.config.get('LITTERBOX_PROXY_SECRET', '')
                 if proxy_url:
-                    # Route through PythonAnywhere proxy (Render's IP is blocked by Litterbox).
                     body = MultipartEncoder(fields={
                         'time': expiry,
                         'fileToUpload': (filename, file.stream, 'application/octet-stream'),
@@ -452,7 +462,6 @@ def upload():
                         result = response.json()
                         link = result.get('url', '')
                 else:
-                    # Direct upload (may fail from Render — use proxy instead).
                     body = MultipartEncoder(fields={
                         'reqtype': 'fileupload', 'time': expiry,
                         'fileToUpload': (filename, file.stream, 'application/octet-stream'),
@@ -465,7 +474,8 @@ def upload():
                         link = response.text.strip()
                 if not re.fullmatch(r'https://litter\.catbox\.moe/[A-Za-z0-9][A-Za-z0-9._-]*', link):
                     raise ValueError('Storage provider returned an invalid file link.')
-            uploads.append(save_share('file', filename, size, expires, url=link, provider=provider,
+                actual_provider = 'litterbox'
+            uploads.append(save_share('file', filename, size, expires, url=link, provider=actual_provider,
                                       custom_key=custom_key, salt=salt, iv=iv_val, is_encrypted=is_encrypted))
             if custom_key and uploads[-1] is None:
                 errors.append(f'{filename}: That custom code is already taken.')
@@ -477,13 +487,13 @@ def upload():
                 except (requests.RequestException, ValueError):
                     logger.warning('An unregistered private upload needs storage cleanup.')
             status = getattr(getattr(exc, 'response', None), 'status_code', None)
-            logger.warning('Upload failed (provider=%s; %s; upstream status=%s)', provider, type(exc).__name__, status)
+            logger.warning('Upload failed (provider=%s; %s; upstream status=%s)', actual_provider, type(exc).__name__, status)
             message = 'Upload could not be completed. The storage provider or server may be unavailable.'
-            if provider == 'litterbox':
+            if actual_provider == 'litterbox':
                 if isinstance(exc, requests.Timeout):
                     message = 'Litterbox upload timed out. Please try again later.'
                 elif status:
-                    message = f'Litterbox rejected the server upload (HTTP {status}). Please try again later or use AlienXFile Storage for smaller files.'
+                    message = f'Litterbox rejected the server upload (HTTP {status}). Please try again later.'
                 elif isinstance(exc, requests.RequestException):
                     message = 'Could not reach Litterbox. Please try again later.'
                 else:
@@ -497,8 +507,8 @@ def upload_folder():
     """Upload multiple files as a single folder share with one code."""
     expiry = request.form.get('expire', '1h')
     custom_key = request.form.get('customKey', '').strip() or None
-    if custom_key and not re.fullmatch(r'[0-9]{5}', custom_key):
-        return error_response('Custom code must be exactly 5 digits.', 400)
+    if custom_key and not re.fullmatch(r'[A-Za-z0-9]{3,20}', custom_key):
+        return error_response('Custom code must be 3-20 letters or numbers.', 400)
     if expiry not in expire_seconds:
         return error_response('Choose a valid expiration.', 400)
     if not app.config['BLOB_READ_WRITE_TOKEN']:
@@ -616,8 +626,8 @@ def upload_litterbox():
     is_encrypted = data.get('isEncrypted') is True or data.get('isEncrypted') == '1'
     salt = data.get('salt') or None
     iv_val = data.get('iv') or None
-    if custom_key and not re.fullmatch(r'[0-9]{5}', custom_key):
-        return error_response('Custom code must be exactly 5 digits.', 400)
+    if custom_key and not re.fullmatch(r'[A-Za-z0-9]{3,20}', custom_key):
+        return error_response('Custom code must be 3-20 letters or numbers.', 400)
     if expire not in expire_seconds:
         return error_response('Choose a valid share mode and expiration.', 400)
     if not name:

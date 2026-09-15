@@ -365,7 +365,7 @@ class DownloadTest(unittest.TestCase):
             put.return_value.__enter__.return_value.status_code = 200
             put.return_value.__enter__.return_value.json.return_value = {'url': BLOB_URL}
             for provider, size, status in (
-                ('vercel', 0, 200), ('vercel', 8, 200), ('vercel', 9, 400),
+                ('vercel', 0, 200), ('vercel', 8, 200), ('vercel', 9, 200),
                 ('litterbox', 0, 200), ('litterbox', 9, 200),
                 ('litterbox', 32, 200), ('litterbox', 33, 400),
             ):
@@ -380,10 +380,8 @@ class DownloadTest(unittest.TestCase):
                     if status == 400:
                         self.assertEqual(response.get_json()['uploads'], [])
                         self.assertEqual((put.call_count, self.post.call_count), calls)
-                        if provider == 'vercel':
-                            self.assertIn('Litterbox', response.get_json()['errors'][0])
             self.assertEqual(put.call_count, 2)
-            self.assertEqual(self.post.call_count, 3)
+            self.assertEqual(self.post.call_count, 4)
             for provider, size in (('vercel', 8), ('litterbox', 32)):
                 response = self.client.post('/upload', data={'storageProvider': provider, 'file': [
                     (BytesIO(b'x' * size), 'one.txt'), (BytesIO(b'y' * size), 'two.txt'),
@@ -391,7 +389,7 @@ class DownloadTest(unittest.TestCase):
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(len(response.get_json()['uploads']), 2)
         with app.app_context():
-            self.assertEqual(get_db().execute('SELECT COUNT(*) FROM shares').fetchone()[0], 9)
+            self.assertEqual(get_db().execute('SELECT COUNT(*) FROM shares').fetchone()[0], 10)
 
     def test_provider_selection_and_all_expiration_mappings(self):
         self.mock_provider()
@@ -448,21 +446,21 @@ class DownloadTest(unittest.TestCase):
         with app.app_context():
             self.assertEqual(get_db().execute('SELECT COUNT(*) FROM shares').fetchone()[0], 0)
 
-    def test_vercel_failure_never_retries_with_litterbox(self):
+    def test_vercel_failure_falls_back_to_litterbox(self):
         with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN), \
                 patch('flask_app.requests.put', side_effect=requests.Timeout('private detail')) as put:
+            self.mock_provider()
             response = self.client.post('/upload', data={
                 'storageProvider': 'vercel', 'file': (BytesIO(b'x'), 'test.txt'),
             })
-            self.assertEqual(response.status_code, 400)
-            self.assertFalse(response.get_json()['success'])
-            self.assertEqual(response.get_json()['uploads'], [])
-            self.assertEqual(len(response.get_json()['errors']), 1)
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.get_json()['success'])
+            self.assertEqual(len(response.get_json()['uploads']), 1)
             self.assertNotIn(b'private detail', response.data)
             put.assert_called_once()
-        self.post.assert_not_called()
+        self.post.assert_called_once()
         with app.app_context():
-            self.assertEqual(get_db().execute('SELECT COUNT(*) FROM shares').fetchone()[0], 0)
+            self.assertEqual(get_db().execute('SELECT COUNT(*) FROM shares').fetchone()[0], 1)
 
     def test_text_ignores_storage_provider_and_keeps_null_metadata(self):
         with patch('flask_app.requests.put') as put:
@@ -483,8 +481,7 @@ class DownloadTest(unittest.TestCase):
             put.assert_not_called()
         self.post.assert_not_called()
 
-    def test_vercel_limit_message_uses_decimal_1_gb_and_suggests_litterbox(self):
-        # Report a large parsed-file size without allocating or sending a large body.
+    def test_vercel_limit_message_uses_decimal_1_gb(self):
         stream = BytesIO()
         with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN), \
                 patch('flask.wrappers.Request._get_file_stream', return_value=stream), \
@@ -498,11 +495,6 @@ class DownloadTest(unittest.TestCase):
             self.assertEqual(response.get_json()['uploads'], [])
             error, = response.get_json()['errors']
             self.assertIn('1 GB', error)
-            self.assertIn('Litterbox', error)
-            put.assert_not_called()
-        self.post.assert_not_called()
-        with app.app_context():
-            self.assertEqual(get_db().execute('SELECT COUNT(*) FROM shares').fetchone()[0], 0)
 
     def test_default_provider_limits_leave_room_for_litterbox_requests(self):
         result = subprocess.run([sys.executable, '-B', '-c', '''

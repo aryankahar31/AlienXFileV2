@@ -115,8 +115,8 @@
                     </div>
                     <div class="custom-code-section">
                         <label for="customCode">Custom code (optional)</label>
-                        <input type="text" id="customCode" name="customCode" pattern="[0-9]{5}" maxlength="5" placeholder="00000" inputmode="numeric">
-                        <p class="notice">5 digits. Leave empty for random code.</p>
+                        <input type="text" id="customCode" name="customCode" pattern="[A-Za-z0-9]{3,20}" maxlength="20" placeholder="e.g. aryan, hello89" inputmode="text" autocomplete="off">
+                        <p class="notice">3-20 letters or numbers. Leave empty for random code.</p>
                     </div>
                 </div>
             </details>
