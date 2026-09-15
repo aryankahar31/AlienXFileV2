@@ -164,13 +164,13 @@
                 <div id="downloadError" class="error-msg" role="alert">{{ error }}</div>
             {% endif %}
             <form method="POST" action="{{ url_for('download_page') }}">
-                <label for="key">Five-digit share key</label>
-                <input id="key" name="key" type="text" inputmode="numeric" pattern="[0-9]{5}"
-                       maxlength="5" minlength="5" required autocomplete="off"
+                <label for="key">Share code</label>
+                <input id="key" name="key" type="text" inputmode="text" pattern="[A-Za-z0-9]{3,20}"
+                       maxlength="20" required autocomplete="off"
                        value="{{ key|default('', true) }}"
                        aria-describedby="keyHelp{% if error|default(none) %} downloadError{% endif %}"
                        {% if error|default(none) and key|default(none) %}aria-invalid="true"{% endif %}>
-                <p id="keyHelp" class="help">Enter exactly five digits (0-9), including leading zeros.</p>
+                <p id="keyHelp" class="help">Enter the share code (letters and numbers).</p>
                 <button class="button" type="submit">Open Share</button>
             </form>
         {% else %}
@@ -269,7 +269,7 @@
         <section class="about-section" aria-labelledby="aboutHeading">
             <h2 id="aboutHeading">About AlienXFile</h2>
             <p>Temporary file and text sharing. Files up to 1 GB. Larger files via Litterbox (~1 GB). Text up to {{ max_text_length }} characters.</p>
-            <p class="privacy">Anyone with a code or link can access the share until it expires. A five-digit code is not encryption.</p>
+            <p class="privacy">Anyone with a code or link can access the share until it expires. A code is not encryption.</p>
         </section>
     </main>
 

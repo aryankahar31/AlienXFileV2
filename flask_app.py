@@ -351,8 +351,8 @@ def google_site_verification():
 def download_page():
     if request.method == 'POST':
         key = request.form.get('key', '').strip()
-        if not re.fullmatch(r'[0-9]{5}', key):
-            return render_template('download.html', key=key, error='Please enter a 5-digit code.'), 400
+        if not re.fullmatch(r'[A-Za-z0-9]{3,20}', key):
+            return render_template('download.html', key=key, error='Please enter a valid code.'), 400
         return redirect(url_for('download_details', key=key), code=303)
     return render_template('download.html')
 
@@ -653,8 +653,8 @@ def upload_litterbox():
 @app.route('/share/<key>', endpoint='download_details')
 @app.route('/download/<key>', endpoint='download_direct')
 def download_share(key):
-    if not re.fullmatch(r'[0-9]{5}', key):
-        return error_response('Invalid or expired code. Enter a 5-digit code below.', 404)
+    if not re.fullmatch(r'[A-Za-z0-9]{3,20}', key):
+        return error_response('Invalid or expired code. Enter a valid code below.', 404)
     db = get_db()
     row = query(db, 'SELECT * FROM shares WHERE key = ?', (key,)).fetchone()
     if row is None:
@@ -874,7 +874,7 @@ def http_error(exc):
                 404: 'Page not found. Enter a share code below.',
                 405: 'This request method is not supported.',
                 413: (f'Upload too large. AlienXFile Storage allows up to {template_settings()["upload_limit_label"]} per file; Litterbox up to 1 GB. Hosting limits may be lower.'
-                      if request.path == '/upload' else 'The submitted code is too long. Enter a 5-digit code.'),
+                      if request.path == '/upload' else 'The submitted code is too long. Enter a valid code.'),
                 500: 'Something went wrong. Please try again later.'}
     body, status = error_response(messages.get(exc.code, exc.description), exc.code)
     response = app.make_response((body, status))

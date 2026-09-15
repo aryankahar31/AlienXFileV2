@@ -128,18 +128,16 @@ class DownloadTest(unittest.TestCase):
         response = self.client.get('/download')
         self.assertEqual(response.status_code, 200)
         field = self.assert_download_form(response)
-        for name, value in {'type': 'text', 'inputmode': 'numeric', 'pattern': '[0-9]{5}',
-                            'minlength': '5', 'maxlength': '5', 'autocomplete': 'off'}.items():
+        for name, value in {'type': 'text', 'inputmode': 'text', 'pattern': '[A-Za-z0-9]{3,20}',
+                            'maxlength': '20', 'autocomplete': 'off'}.items():
             self.assertEqual(field[name], value)
         self.assertIn('required', field)
-        for key in ('', '1234', '123456', 'abcde', '+1234', '12.34', '12 34',
+        for key in ('', 'ab', 'a' * 21, '+1234', '12.34', '12 34',
                     '\uff11\uff12\uff13\uff14\uff15', '\u0661\u0662\u0663\u0664\u0665',
                     "' OR 1=1", 'https://evil.example'):
             with self.subTest(key=key):
                 response = self.client.post('/download', data={'key': key})
                 self.assertEqual(response.status_code, 400)
-                self.assertIn(b'5-digit code', response.data)
-                self.assertEqual(self.assert_download_form(response)['value'], key)
         for key in ('00000', '99999', ' 00123 \n'):
             with self.subTest(valid=key):
                 response = self.client.post('/download', data={'key': key})

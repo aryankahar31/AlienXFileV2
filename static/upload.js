@@ -475,7 +475,7 @@ function renderUpload(upload, batch) {
     const directURL = new URL(upload.link);
     const expires = new Date(upload.expires);
     if (![pageURL, directURL].every(url => ["https:", "http:"].includes(url.protocol)) ||
-        !/^\d{5}$/.test(upload.key) || !Number.isFinite(expires.getTime())) {
+        !/^[A-Za-z0-9]{3,20}$/.test(upload.key) || !Number.isFinite(expires.getTime())) {
         throw new Error("The server returned invalid share details.");
     }
     const item = document.createElement("article");

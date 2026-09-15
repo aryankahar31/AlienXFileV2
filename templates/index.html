@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     {% set page_title = 'AlienXFile - Temporary File & Text Sharing' %}
-    {% set description = 'Share files and text with AlienXFile using five-digit codes and links. No account needed. Choose an expiration from one hour to three days.' %}
+    {% set description = 'Share files and text with AlienXFile using short codes and links. No account needed. Choose an expiration from one hour to three days.' %}
     <title>{{ page_title }}</title>
     <meta name="description" content="{{ description }}">
     <meta name="robots" content="index, follow">
@@ -46,7 +46,7 @@
     <main class="card">
         <button type="button" class="dark-toggle" id="darkToggle" aria-label="Toggle dark mode">🌙</button>
         <h1>AlienXFile</h1>
-        <p class="intro">Share files or text with a five-digit code. No account needed.</p>
+        <p class="intro">Share files or text with a short code. No account needed.</p>
         <noscript><p class="notice">JavaScript is required for uploads. Enable it and reload.</p></noscript>
         <form id="uploadForm" action="/upload" method="post" enctype="multipart/form-data"
               data-max-bytes="{{ upload_max_bytes }}" data-limit-label="1 GB"
@@ -141,7 +141,7 @@
         <hr class="divider">
         <a href="/download" class="download-cta">
             Have a code? Download a file
-            <small>Enter a five-digit code to retrieve shared content.</small>
+            <small>Enter a code to retrieve shared content.</small>
         </a>
 
         <div class="about-section">
@@ -177,7 +177,7 @@
                 </div>
             </div>
 
-            <p class="about-footer">Five-digit codes are not encryption. Avoid sharing sensitive content.</p>
+            <p class="about-footer">Codes are not encryption. Avoid sharing sensitive content.</p>
 
             <div class="features-grid">
                 <div class="feature-card">
