@@ -137,7 +137,7 @@ def template_settings():
     return dict(upload_max_bytes=limit,
                 litterbox_max_bytes=app.config['LITTERBOX_MAX_BYTES'],
                 site_url=SITE_URL,
-                upload_limit_label='1 GB' if limit == MAX_FILE_BYTES else f'{limit / 1_000_000:g} MB',
+                upload_limit_label='1 GB' if limit >= 1_000_000_000 else f'{limit / 1_000_000:g} MB',
                 max_text_length=app.config['MAX_TEXT_LENGTH'], banned_exts=sorted(banned_exts),
                 storage_provider='Vercel Blob and Litterbox')
 

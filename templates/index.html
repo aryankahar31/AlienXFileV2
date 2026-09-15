@@ -49,7 +49,7 @@
         <p class="intro">Share files or text with a five-digit code. No account needed.</p>
         <noscript><p class="notice">JavaScript is required for uploads. Enable it and reload.</p></noscript>
         <form id="uploadForm" action="/upload" method="post" enctype="multipart/form-data"
-              data-max-bytes="{{ upload_max_bytes }}" data-limit-label="{{ upload_limit_label }}"
+              data-max-bytes="{{ upload_max_bytes }}" data-limit-label="1 GB"
               data-litterbox-max-bytes="{{ litterbox_max_bytes }}"
               data-max-text-length="{{ max_text_length }}">
             <input type="hidden" name="storageProvider" id="storageProvider" value="vercel">
@@ -72,7 +72,7 @@
                     <small>Up to 1 GB. Large files use temporary storage automatically.</small>
                 </label>
                 <input type="file" name="file" id="fileInput" multiple required aria-describedby="fileLimits" />
-                <p class="notice" id="fileLimits" aria-live="polite">Up to {{ upload_limit_label }} per file.</p>
+                <p class="notice" id="fileLimits" aria-live="polite">Up to 1 GB per file.</p>
                 <p class="notice">Blocked: {{ banned_exts | join(', ') }}.</p>
                 <p class="notice paste-hint" id="pasteHint">You can also paste images from clipboard (Ctrl+V)</p>
                 <p class="notice" id="storageNote" hidden>Large file detected. It will be uploaded to temporary third-party storage.</p>
@@ -169,7 +169,7 @@
             <div class="about-cards">
                 <div class="about-card">
                     <h4>Storage</h4>
-                    <p>AlienXFile Storage for normal files (up to {{ upload_limit_label }}). Litterbox for larger files (up to ~1 GB, third-party).</p>
+                    <p>AlienXFile Storage for normal files (up to 1 GB). Litterbox for larger files (up to ~1 GB, third-party).</p>
                 </div>
                 <div class="about-card">
                     <h4>Expiration</h4>
@@ -185,7 +185,7 @@
                         <svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
                     </div>
                     <h4>Easy Upload</h4>
-                    <p>Drag, drop, or click. Files up to {{ upload_limit_label }}.</p>
+                    <p>Drag, drop, or click. Files up to 1 GB.</p>
                 </div>
                 <div class="feature-card">
                     <div class="feature-icon">
