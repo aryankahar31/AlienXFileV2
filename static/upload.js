@@ -522,12 +522,13 @@ function renderUpload(upload, batch) {
         });
         codeLine.append(button);
     }
-    for (const [label, url] of [["Details Page", pageURL], ["Direct Link", directURL]]) {
+    for (const [label, url] of [["Preview", pageURL], ["Details Page", pageURL], ["Direct Link", directURL]]) {
         const link = document.createElement("a");
         link.textContent = label;
         link.href = url.href;
         link.target = "_blank";
         link.rel = "noopener noreferrer";
+        if (label === "Preview") link.className = "preview-link";
         links.append(link);
     }
     const qrDetails = document.createElement("details");

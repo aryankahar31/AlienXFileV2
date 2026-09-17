@@ -259,7 +259,9 @@ def response_headers(response):
         "font-src https://fonts.gstatic.com; "
         "connect-src 'self' https://alienxfile-proxy.fly.dev; "
         "img-src 'self' data: https://litter.catbox.moe; "
-        "object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+        "media-src 'self'; "
+        "object-src 'self'; "
+        "base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
     )
     if request.endpoint != 'static':
         response.headers['Cache-Control'] = 'no-store'
@@ -647,6 +649,86 @@ def upload_litterbox():
     except ValueError as exc:
         return error_response(str(exc), 503)
     return jsonify(success=True, uploads=[shared], errors=[])
+
+
+PREVIEW_EXTENSIONS = {
+    'image': {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.ico', '.avif'},
+    'video': {'.mp4', '.webm', '.ogv', '.mov', '.mkv'},
+    'audio': {'.mp3', '.wav', '.ogg', '.flac', '.aac', '.m4a', '.wma'},
+    'pdf':   {'.pdf'},
+    'code':  {'.txt', '.md', '.py', '.js', '.ts', '.jsx', '.tsx', '.html', '.css', '.json',
+              '.xml', '.yaml', '.yml', '.toml', '.sh', '.bash', '.c', '.cpp', '.h', '.hpp',
+              '.java', '.rb', '.go', '.rs', '.sql', '.csv', '.log', '.ini', '.cfg', '.conf',
+              '.php', '.r', '.swift', '.kt', '.scala', '.lua', '.pl', '.dart', '.vue', '.svelte',
+              '.astro', '.tf', '.dockerfile', '.makefile', '.gitignore', '.env'},
+}
+
+
+def _preview_category(filename):
+    ext = Path(filename).suffix.lower()
+    for category, exts in PREVIEW_EXTENSIONS.items():
+        if ext in exts:
+            return category
+    return None
+
+
+@app.route('/api/preview/<key>')
+def preview_file(key):
+    if not re.fullmatch(r'[A-Za-z0-9]{3,20}', key):
+        return error_response('Invalid code.', 404)
+    db = get_db()
+    row = query(db, 'SELECT * FROM shares WHERE key = ?', (key,)).fetchone()
+    if row is None or row['type'] != 'file':
+        return error_response('Not a file share.', 404)
+    if row['expires'] <= time.time():
+        cleanup_expired(db)
+        return error_response('Expired.', 410)
+    category = _preview_category(row['name'] or '')
+    if not category:
+        return error_response('No preview available for this file type.', 400)
+    url = row['url']
+    if row['provider'] == 'litterbox':
+        if not re.fullmatch(r'https://litter\.catbox\.moe/[A-Za-z0-9][A-Za-z0-9._-]*', url or ''):
+            return error_response('Invalid storage link.', 502)
+        try:
+            upstream = requests.get(url, stream=True, timeout=(10, 60), allow_redirects=False)
+            if upstream.status_code != 200:
+                upstream.close()
+                return error_response('Storage unavailable.', 502)
+        except requests.RequestException:
+            return error_response('Storage unavailable.', 502)
+    elif row['provider'] == 'vercel':
+        try:
+            upstream = requests.get(checked_blob_url(url),
+                                    headers={'Authorization': blob_headers()['Authorization'], 'Accept-Encoding': 'identity'},
+                                    stream=True, timeout=(10, 60), allow_redirects=False)
+            if upstream.status_code != 200:
+                upstream.close()
+                return error_response('Storage unavailable.', 502)
+        except (requests.RequestException, ValueError):
+            return error_response('Storage unavailable.', 502)
+    else:
+        return error_response('Unknown storage provider.', 502)
+    if category == 'code':
+        content = upstream.iter_content(chunk_size=8192)
+        text = b''
+        for chunk in content:
+            text += chunk
+            if len(text) > 100_000:
+                break
+        upstream.close()
+        try:
+            decoded = text.decode('utf-8', errors='replace')
+        except Exception:
+            decoded = text.decode('latin-1', errors='replace')
+        return jsonify(content=decoded, name=row['name'], truncated=len(text) > 100_000)
+    content_type = upstream.headers.get('Content-Type', 'application/octet-stream')
+    if 'text/plain' not in content_type and 'application/octet-stream' not in content_type:
+        pass
+    response = Response(upstream.iter_content(chunk_size=64 * 1024), content_type=content_type)
+    response.headers['Content-Length'] = str(row['size'])
+    response.call_on_close(upstream.close)
+    return response
 
 
 @app.route('/qr/<key>', endpoint='share_qr')

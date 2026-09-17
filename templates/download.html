@@ -155,6 +155,51 @@
         .about-section p { font-size: 12px; color: #888; line-height: 1.5; }
         .about-section p:last-child { margin-bottom: 0; }
 
+        .preview-container { margin: 0 0 20px; }
+        .preview-media {
+            width: 100%; border-radius: 6px; display: block;
+            border: 3px solid #111; box-shadow: 4px 4px 0 #111;
+        }
+        .preview-image { max-height: 500px; object-fit: contain; background: #f8f8f8; }
+        .preview-video { max-height: 500px; background: #000; }
+        .preview-audio-card {
+            text-align: center; padding: 32px 20px;
+            border: 3px solid #111; border-radius: 6px;
+            box-shadow: 4px 4px 0 #111; background: var(--cream);
+        }
+        .preview-audio-icon { color: var(--cyan); margin-bottom: 12px; }
+        .preview-audio-name { font-weight: 700; font-size: 14px; margin-bottom: 16px; word-break: break-all; }
+        .preview-audio { width: 100%; max-width: 400px; }
+        .preview-pdf-container { border: 3px solid #111; border-radius: 6px; box-shadow: 4px 4px 0 #111; overflow: hidden; }
+        .preview-pdf { border: none; display: block; }
+        .preview-code-header {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 10px 16px; background: #e8e8e8;
+            border: 3px solid #111; border-bottom: none; border-radius: 6px 6px 0 0;
+            font-size: 13px; font-weight: 700;
+        }
+        .preview-code-filename { font-family: 'Courier New', monospace; }
+        .preview-code {
+            margin: 0; padding: 16px;
+            border: 3px solid #111; border-radius: 0 0 6px 6px;
+            background: #1e1e2e; color: #cdd6f4;
+            font-family: 'Courier New', monospace; font-size: 13px;
+            line-height: 1.5; text-align: left; white-space: pre-wrap;
+            overflow-wrap: anywhere; max-height: 500px; overflow: auto;
+            box-shadow: 3px 3px 0 #111; tab-size: 4;
+        }
+        .preview-loading { color: #888; font-style: italic; }
+
+        body.dark .preview-media { border-color: var(--cyan); box-shadow: 4px 4px 0 var(--cyan); }
+        body.dark .preview-image { background: #0d1117; }
+        body.dark .preview-audio-card { background: #0d1117; border-color: var(--cyan); box-shadow: 4px 4px 0 var(--cyan); }
+        body.dark .preview-audio-icon { color: var(--yellow); }
+        body.dark .preview-audio-name { color: #e6edf3; }
+        body.dark .preview-pdf-container { border-color: var(--cyan); box-shadow: 4px 4px 0 var(--cyan); }
+        body.dark .preview-code-header { background: #161b22; border-color: var(--cyan); color: #e6edf3; }
+        body.dark .preview-code { border-color: var(--cyan); box-shadow: 3px 3px 0 var(--cyan); }
+        body.dark .preview-loading { color: #484f58; }
+
         body.dark .box { background: #161b22; border-color: var(--cyan); box-shadow: 4px 4px 0 var(--cyan); color: #e6edf3; }
         body.dark h1, body.dark h2 { color: #e6edf3; }
         body.dark .error-msg { background: #3d1219; border-color: #f85149; box-shadow: 3px 3px 0 #f85149; }
@@ -242,6 +287,58 @@
                 {% if share.storageProvider == 'litterbox' %}
                     <p class="privacy">Third-party storage. Availability may end before expiry.</p>
                 {% endif %}
+
+                {% set ext = share.name.split('.')[-1]|lower if share.name and '.' in share.name else '' %}
+                {% set previewCat = 'image' if ext in ['png','jpg','jpeg','gif','webp','svg','bmp','ico','avif']
+                    else 'video' if ext in ['mp4','webm','ogv','mov','mkv']
+                    else 'audio' if ext in ['mp3','wav','ogg','flac','aac','m4a','wma']
+                    else 'pdf' if ext == 'pdf'
+                    else 'code' if ext in ['txt','md','py','js','ts','jsx','tsx','html','css','json','xml','yaml','yml','toml','sh','bash','c','cpp','h','hpp','java','rb','go','rs','sql','csv','log','ini','cfg','conf','php','r','swift','kt','scala','lua','pl','dart','vue','svelte','astro','tf']
+                    else '' %}
+
+                {% if previewCat == 'image' %}
+                <div class="preview-container" id="previewContainer">
+                    <img class="preview-media preview-image" src="{{ url_for('preview_file', key=share.key) }}"
+                         alt="Preview of {{ share.name }}" loading="lazy">
+                </div>
+                {% elif previewCat == 'video' %}
+                <div class="preview-container" id="previewContainer">
+                    <video class="preview-media preview-video" controls preload="metadata"
+                           poster="{{ url_for('preview_file', key=share.key) }}">
+                        <source src="{{ url_for('preview_file', key=share.key) }}">
+                        Your browser cannot play this video.
+                    </video>
+                </div>
+                {% elif previewCat == 'audio' %}
+                <div class="preview-container" id="previewContainer">
+                    <div class="preview-audio-card">
+                        <div class="preview-audio-icon">
+                            <svg viewBox="0 0 24 24" width="48" height="48"><path fill="currentColor" d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg>
+                        </div>
+                        <p class="preview-audio-name">{{ share.name }}</p>
+                        <audio class="preview-audio" controls preload="metadata">
+                            <source src="{{ url_for('preview_file', key=share.key) }}">
+                            Your browser cannot play this audio.
+                        </audio>
+                    </div>
+                </div>
+                {% elif previewCat == 'pdf' %}
+                <div class="preview-container preview-pdf-container" id="previewContainer">
+                    <embed class="preview-pdf" src="{{ url_for('preview_file', key=share.key) }}"
+                           type="application/pdf" width="100%" height="600px">
+                </div>
+                {% elif previewCat == 'code' %}
+                <div class="preview-container" id="previewContainer">
+                    <div class="preview-code-header">
+                        <span class="preview-code-filename">{{ share.name }}</span>
+                        <button type="button" class="copy-btn" id="previewCopyBtn" aria-label="Copy file contents">Copy</button>
+                    </div>
+                    <pre class="preview-code" id="previewCodeContent" tabindex="0" role="region" aria-label="File preview">
+                    <span class="preview-loading">Loading preview...</span></pre>
+                    <p class="help" id="previewTruncation" hidden>Preview truncated to first 100 KB.</p>
+                </div>
+                {% endif %}
+
                 <a class="button" href="{{ share.link }}" aria-label="Download {{ share.name }}">Download</a>
             {% elif share.type == 'folder' %}
                 <h2>{{ share.files|length }} file{{ 's' if share.files|length != 1 }}</h2>
@@ -459,6 +556,39 @@
             html = html.replace(/\n/g, '<br>');
             return html;
         }
+
+        // Code file preview loader
+        (function() {
+            const previewCode = document.getElementById('previewCodeContent');
+            const truncationNote = document.getElementById('previewTruncation');
+            const copyBtn = document.getElementById('previewCopyBtn');
+            if (!previewCode) return;
+            fetch('{{ url_for("preview_file", key=share.key) }}')
+                .then(resp => {
+                    if (!resp.ok) throw new Error('Preview unavailable');
+                    return resp.json();
+                })
+                .then(data => {
+                    const escaped = data.content.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                    previewCode.textContent = '';
+                    previewCode.textContent = data.content;
+                    if (data.truncated && truncationNote) truncationNote.hidden = false;
+                })
+                .catch(() => {
+                    previewCode.textContent = 'Preview unavailable. Click Download to save the file.';
+                });
+            if (copyBtn) {
+                copyBtn.addEventListener('click', async () => {
+                    try {
+                        await navigator.clipboard.writeText(previewCode.textContent);
+                        copyBtn.textContent = 'Copied!';
+                        setTimeout(() => { copyBtn.textContent = 'Copy'; }, 2000);
+                    } catch {
+                        copyBtn.textContent = 'Copy failed';
+                    }
+                });
+            }
+        })();
     </script>
     {% endif %}
     <script>

@@ -23,7 +23,7 @@ import requests
 from flask import render_template, request
 from requests_toolbelt.multipart.encoder import MultipartEncoder
 
-from flask_app import app, get_db
+from flask_app import app, get_db, save_share
 
 
 FILE_URL = 'https://litter.catbox.moe/abc123.txt'
@@ -992,6 +992,49 @@ with patch('flask_app.time.time', return_value=float(sys.argv[2])), patch(
             self.assertEqual(response.status_code, 503)
             self.assertFalse(response.get_json()['success'])
             self.assertNotIn(b'private DB path', response.data)
+
+
+    def test_preview_endpoint(self):
+        self.mock_provider(link='https://litter.catbox.moe/abc123py', status=200)
+        response = self.client.post('/upload', data={
+            'mode': 'file', 'storageProvider': 'litterbox',
+            'file': (BytesIO(b'print("hello")'), 'test.py'), 'expire': '1h',
+        })
+        self.assertEqual(response.status_code, 200, response.get_json())
+        key = response.get_json()['uploads'][0]['key']
+        with patch('flask_app.requests.get') as mock_get:
+            file_resp = requests.Response()
+            file_resp.status_code = 200
+            file_resp._content = b'print("hello")'
+            file_resp._content_consumed = True
+            file_resp.headers['Content-Type'] = 'text/plain'
+            mock_get.return_value.__enter__ = lambda s: s
+            mock_get.return_value.__exit__ = lambda s, *a: False
+            mock_get.return_value = file_resp
+            response = self.client.get(f'/api/preview/{key}')
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.get_json()['content'], 'print("hello")')
+        self.mock_provider(link='https://litter.catbox.moe/imgpng', status=200)
+        response = self.client.post('/upload', data={
+            'mode': 'file', 'storageProvider': 'litterbox',
+            'file': (BytesIO(b'\x89PNG'), 'photo.png'), 'expire': '1h',
+        })
+        self.assertEqual(response.status_code, 200, response.get_json())
+        key2 = response.get_json()['uploads'][0]['key']
+        with patch('flask_app.requests.get') as mock_get:
+            file_resp = requests.Response()
+            file_resp.status_code = 200
+            file_resp._content = b'\x89PNG'
+            file_resp._content_consumed = True
+            file_resp.headers['Content-Type'] = 'image/png'
+            mock_get.return_value.__enter__ = lambda s: s
+            mock_get.return_value.__exit__ = lambda s, *a: False
+            mock_get.return_value = file_resp
+            response = self.client.get(f'/api/preview/{key2}')
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('image/png', response.content_type)
+        response = self.client.get('/api/preview/abc123')
+        self.assertEqual(response.status_code, 404)
 
 
 if __name__ == '__main__':
