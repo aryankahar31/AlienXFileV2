@@ -200,6 +200,35 @@
         body.dark .preview-code { border-color: var(--cyan); box-shadow: 3px 3px 0 var(--cyan); }
         body.dark .preview-loading { color: #484f58; }
 
+        .preview-code-controls { display: flex; gap: 6px; }
+        .preview-code-controls .copy-btn { padding: 4px 10px; font-size: 12px; min-height: auto; }
+
+        .lightbox { position: fixed; inset: 0; z-index: 9999; display: flex; flex-direction: column; }
+        .lightbox[hidden] { display: none; }
+        .lightbox-overlay { position: absolute; inset: 0; background: rgba(0,0,0,0.92); }
+        .lightbox-toolbar {
+            position: relative; z-index: 2; display: flex; align-items: center; justify-content: center;
+            gap: 8px; padding: 10px 16px; background: rgba(0,0,0,0.8);
+        }
+        .lightbox-btn {
+            background: rgba(255,255,255,0.15); color: #fff; border: 1px solid rgba(255,255,255,0.25);
+            border-radius: 6px; min-width: 40px; min-height: 40px; font-size: 18px; font-weight: 700;
+            cursor: pointer; display: flex; align-items: center; justify-content: center;
+            transition: background 0.15s;
+        }
+        .lightbox-btn:hover { background: rgba(255,255,255,0.3); }
+        .lightbox-zoom-level { color: #fff; font-size: 14px; font-weight: 600; min-width: 50px; text-align: center; }
+        .lightbox-close { font-size: 24px; min-width: 44px; margin-left: 16px; }
+        .lightbox-viewport {
+            position: relative; z-index: 1; flex: 1; overflow: hidden; display: flex;
+            align-items: center; justify-content: center; cursor: grab;
+        }
+        .lightbox-viewport:active { cursor: grabbing; }
+        .lightbox-img {
+            max-width: 90vw; max-height: 85vh; object-fit: contain; transition: none;
+            transform-origin: center center; user-select: none; -webkit-user-drag: none;
+        }
+
         body.dark .box { background: #161b22; border-color: var(--cyan); box-shadow: 4px 4px 0 var(--cyan); color: #e6edf3; }
         body.dark h1, body.dark h2 { color: #e6edf3; }
         body.dark .error-msg { background: #3d1219; border-color: #f85149; box-shadow: 3px 3px 0 #f85149; }
@@ -298,8 +327,10 @@
 
                 {% if previewCat == 'image' %}
                 <div class="preview-container" id="previewContainer">
-                    <img class="preview-media preview-image" src="{{ url_for('preview_file', key=share.key) }}"
-                         alt="Preview of {{ share.name }}" loading="lazy">
+                    <img class="preview-media preview-image" id="previewImage" src="{{ url_for('preview_file', key=share.key) }}"
+                         alt="Preview of {{ share.name }}" loading="lazy"
+                         title="Click to zoom"
+                         style="cursor: zoom-in;">
                 </div>
                 {% elif previewCat == 'video' %}
                 <div class="preview-container" id="previewContainer">
@@ -331,7 +362,11 @@
                 <div class="preview-container" id="previewContainer">
                     <div class="preview-code-header">
                         <span class="preview-code-filename">{{ share.name }}</span>
-                        <button type="button" class="copy-btn" id="previewCopyBtn" aria-label="Copy file contents">Copy</button>
+                        <div class="preview-code-controls">
+                            <button type="button" class="copy-btn" id="codeFontDown" aria-label="Decrease font size" title="Smaller text">A-</button>
+                            <button type="button" class="copy-btn" id="codeFontUp" aria-label="Increase font size" title="Bigger text">A+</button>
+                            <button type="button" class="copy-btn" id="previewCopyBtn" aria-label="Copy file contents">Copy</button>
+                        </div>
                     </div>
                     <pre class="preview-code" id="previewCodeContent" tabindex="0" role="region" aria-label="File preview">
                     <span class="preview-loading">Loading preview...</span></pre>
@@ -591,11 +626,158 @@
         })();
     </script>
     {% endif %}
+
+    <div class="lightbox" id="lightbox" hidden>
+        <div class="lightbox-overlay" id="lightboxOverlay"></div>
+        <div class="lightbox-toolbar">
+            <button type="button" class="lightbox-btn" id="zoomOut" aria-label="Zoom out" title="Zoom out">&#8722;</button>
+            <span class="lightbox-zoom-level" id="zoomLevel">100%</span>
+            <button type="button" class="lightbox-btn" id="zoomIn" aria-label="Zoom in" title="Zoom in">&#43;</button>
+            <button type="button" class="lightbox-btn" id="zoomReset" aria-label="Reset zoom" title="Reset">&#8634;</button>
+            <button type="button" class="lightbox-btn lightbox-close" id="lightboxClose" aria-label="Close preview" title="Close">&times;</button>
+        </div>
+        <div class="lightbox-viewport" id="lightboxViewport">
+            <img class="lightbox-img" id="lightboxImg" alt="Preview">
+        </div>
+    </div>
+
     <script>
         if (localStorage.getItem('alienxfile_dark') === 'true' ||
             (!localStorage.getItem('alienxfile_dark') && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
             document.body.classList.add('dark');
         }
+    </script>
+
+    <script>
+    (function() {
+        const lightbox = document.getElementById('lightbox');
+        const overlay = document.getElementById('lightboxOverlay');
+        const viewport = document.getElementById('lightboxViewport');
+        const img = document.getElementById('lightboxImg');
+        const zoomInBtn = document.getElementById('zoomIn');
+        const zoomOutBtn = document.getElementById('zoomOut');
+        const zoomResetBtn = document.getElementById('zoomReset');
+        const zoomLevel = document.getElementById('zoomLevel');
+        const closeBtn = document.getElementById('lightboxClose');
+        const previewImg = document.getElementById('previewImage');
+        if (!lightbox || !previewImg) return;
+
+        let scale = 1, panX = 0, panY = 0, dragging = false, startX = 0, startY = 0;
+        let lastPinchDist = 0;
+
+        function updateTransform() {
+            img.style.transform = `translate(${panX}px, ${panY}px) scale(${scale})`;
+            zoomLevel.textContent = Math.round(scale * 100) + '%';
+        }
+        function clampPan() {
+            const vw = viewport.clientWidth, vh = viewport.clientHeight;
+            const iw = img.naturalWidth * scale, ih = img.naturalHeight * scale;
+            const maxX = Math.max(0, (iw - vw) / 2);
+            const maxY = Math.max(0, (ih - vh) / 2);
+            panX = Math.max(-maxX, Math.min(maxX, panX));
+            panY = Math.max(-maxY, Math.min(maxY, panY));
+        }
+        function setZoom(newScale) {
+            scale = Math.max(0.2, Math.min(10, newScale));
+            clampPan();
+            updateTransform();
+        }
+        function openLightbox() {
+            img.src = previewImg.src;
+            scale = 1; panX = 0; panY = 0;
+            updateTransform();
+            lightbox.hidden = false;
+            document.body.style.overflow = 'hidden';
+            img.style.cursor = 'grab';
+        }
+        function closeLightbox() {
+            lightbox.hidden = true;
+            document.body.style.overflow = '';
+        }
+        previewImg.addEventListener('click', openLightbox);
+        closeBtn.addEventListener('click', closeLightbox);
+        overlay.addEventListener('click', closeLightbox);
+        document.addEventListener('keydown', (e) => {
+            if (!lightbox.hidden) {
+                if (e.key === 'Escape') closeLightbox();
+                if (e.key === '+' || e.key === '=') { e.preventDefault(); setZoom(scale * 1.25); }
+                if (e.key === '-') { e.preventDefault(); setZoom(scale / 1.25); }
+                if (e.key === '0') { e.preventDefault(); scale = 1; panX = 0; panY = 0; updateTransform(); }
+            }
+        });
+        zoomInBtn.addEventListener('click', () => setZoom(scale * 1.25));
+        zoomOutBtn.addEventListener('click', () => setZoom(scale / 1.25));
+        zoomResetBtn.addEventListener('click', () => { scale = 1; panX = 0; panY = 0; updateTransform(); });
+
+        viewport.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            const rect = viewport.getBoundingClientRect();
+            const mx = e.clientX - rect.left - rect.width / 2;
+            const my = e.clientY - rect.top - rect.height / 2;
+            const oldScale = scale;
+            setZoom(e.deltaY < 0 ? scale * 1.12 : scale / 1.12);
+            const ratio = scale / oldScale;
+            panX = mx - ratio * (mx - panX);
+            panY = my - ratio * (my - panY);
+            clampPan();
+            updateTransform();
+        }, { passive: false });
+
+        viewport.addEventListener('mousedown', (e) => {
+            if (e.button !== 0) return;
+            dragging = true; startX = e.clientX - panX; startY = e.clientY - panY;
+            img.style.cursor = 'grabbing';
+        });
+        document.addEventListener('mousemove', (e) => {
+            if (!dragging) return;
+            panX = e.clientX - startX; panY = e.clientY - startY;
+            clampPan();
+            updateTransform();
+        });
+        document.addEventListener('mouseup', () => { dragging = false; if (!lightbox.hidden) img.style.cursor = 'grab'; });
+
+        viewport.addEventListener('dblclick', (e) => {
+            e.preventDefault();
+            if (scale > 1.05) { scale = 1; panX = 0; panY = 0; }
+            else { scale = 2.5; const rect = viewport.getBoundingClientRect(); panX = (rect.width / 2 - (e.clientX - rect.left)) * 1; panY = (rect.height / 2 - (e.clientY - rect.top)) * 1; }
+            clampPan();
+            updateTransform();
+        });
+
+        viewport.addEventListener('touchstart', (e) => {
+            if (e.touches.length === 1) { dragging = true; startX = e.touches[0].clientX - panX; startY = e.touches[0].clientY - panY; }
+            if (e.touches.length === 2) {
+                dragging = false;
+                lastPinchDist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+            }
+        }, { passive: true });
+        viewport.addEventListener('touchmove', (e) => {
+            if (e.touches.length === 1 && dragging) {
+                panX = e.touches[0].clientX - startX; panY = e.touches[0].clientY - startY;
+                clampPan(); updateTransform();
+            }
+            if (e.touches.length === 2) {
+                e.preventDefault();
+                const dist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+                setZoom(scale * (dist / lastPinchDist));
+                lastPinchDist = dist;
+            }
+        }, { passive: false });
+        viewport.addEventListener('touchend', () => { dragging = false; });
+    })();
+    </script>
+
+    <script>
+    (function() {
+        const codeEl = document.getElementById('previewCodeContent');
+        const fontUp = document.getElementById('codeFontUp');
+        const fontDown = document.getElementById('codeFontDown');
+        if (!codeEl || !fontUp || !fontDown) return;
+        let fontSize = 13;
+        function updateSize() { codeEl.style.fontSize = fontSize + 'px'; }
+        fontUp.addEventListener('click', () => { fontSize = Math.min(32, fontSize + 2); updateSize(); });
+        fontDown.addEventListener('click', () => { fontSize = Math.max(8, fontSize - 2); updateSize(); });
+    })();
     </script>
 </body>
 </html>

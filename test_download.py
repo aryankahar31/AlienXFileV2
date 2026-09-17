@@ -167,7 +167,7 @@ class DownloadTest(unittest.TestCase):
             self.assertIn('&lt;img src=x onerror=alert(1)&gt;', html)
             tags = Markup(html).tags
             self.assertFalse(any('onerror' in attrs for tag, attrs in tags))
-            self.assertTrue(all(attrs.get('src') == '/qr/00007' for tag, attrs in tags if tag == 'img'))
+            self.assertTrue(all(attrs.get('src') == '/qr/00007' for tag, attrs in tags if tag == 'img' and attrs.get('src')))
         time_tag = next(attrs for tag, attrs in Markup(share_html).tags if tag == 'time')
         self.assertEqual(time_tag['title'], payload + ' (UTC)')
         self.assertEqual(time_tag['datetime'], payload)
