@@ -14,3 +14,9 @@ services:
         sync: false
       - key: BLOB_READ_WRITE_TOKEN
         sync: false
+      - key: ALIENX_MCP_ENABLED
+        value: "0"
+      - key: MCP_API_KEY
+        sync: false
+      - key: ALIENX_PUBLIC_BASE_URL
+        value: https://alienxfilev2.onrender.com

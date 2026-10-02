@@ -70,6 +70,56 @@ For Litterbox, the backend sends `reqtype=fileupload`, `time=1h|12h|24h|72h`, an
 
 The size warning suggests Litterbox when a file exceeds the normal limit; it does not switch providers automatically or promise that the host/provider will accept the file. Litterbox is temporary third-party storage and should not receive sensitive files.
 
+## MCP Integration
+
+`POST /mcp` is a stateless [Model Context Protocol](https://modelcontextprotocol.io) server so AI clients can create and read shares through the same upload, database, validation, and rate-limit code as the website. It is one JSON-RPC 2.0 endpoint answering `application/json` (no SSE, no sessions, no ASGI server, no new dependencies). The endpoint returns 404 unless it is explicitly enabled.
+
+### Configuration
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `ALIENX_MCP_ENABLED` | `0` | Set to `1` to serve `/mcp`; any other value returns 404 for GET and POST. |
+| `MCP_API_KEY` | empty | Optional shared secret. When set, every `/mcp` request needs `Authorization: Bearer <key>` and otherwise gets 401 with JSON-RPC `-32001`. Empty means anonymous mode with a startup warning. Keep it in dashboard secrets, never in source. |
+| `ALIENX_PUBLIC_BASE_URL` | `https://alienxfilev2.onrender.com` | Base used for returned `/share/<code>` and `/download/<code>` URLs. |
+| `MCP_MAX_UPLOAD_BYTES` | `26214400` (25 MiB) | Decoded size cap for `upload_file`, also bounding the JSON request body (413 beyond it). |
+| `MCP_RATE_LIMIT` | `60` | Requests per IP in the write bucket (`initialize`, `ping`, `tools/list`, `share_text`, `upload_file`). |
+| `MCP_LOOKUP_RATE_LIMIT` | `20` | Calls per IP in the read bucket (`get_shared_content`, `get_shared_file`, `check_share`). |
+| `MCP_RATE_WINDOW` | `600` | Window seconds for both MCP buckets; they are separate from the website's upload/lookup buckets. |
+| `MCP_ALLOWED_ORIGINS` | `https://chatgpt.com,https://chat.openai.com` | Browser `Origin` allowlist. Any other Origin gets 403; clients that send no Origin (curl, server-side SDKs) are unaffected. |
+
+Beyond the gateway IP limits, `/mcp` shares the site-wide constraints: 1 GB absolute request cap, `MAX_TEXT_LENGTH`, banned executable extensions, custom-code validation, and provider fallback.
+
+### Protocol behavior
+
+- Methods: `initialize` (returns `capabilities.tools`, `serverInfo`, and usage instructions), `notifications/initialized` (202 with an empty body), `ping`, `tools/list`, `tools/call`.
+- JSON-RPC errors: unknown method `-32601` with HTTP 200, parse error `-32700` with 400, invalid request `-32600` with 400 (415 for a non-JSON content type, 413 for an oversized body, 405 for GET), invalid params `-32602`, rate limit `-32005` with 429 and `Retry-After`.
+- Tool-level failures (unknown code, bad argument, storage unavailable) are returned as `isError: true` results with a safe message, never as protocol errors and never with stack traces. Request bodies are never logged because they carry user content.
+
+### Tools
+
+| Tool | What it does |
+| --- | --- |
+| `upload_file` | Stores a base64-encoded file (≤ `MCP_MAX_UPLOAD_BYTES` decoded) through the normal `/upload` path and returns a code plus public URLs. Oversized files are rejected with instructions to upload on the website. |
+| `share_text` | Stores text (≤ 100,000 characters) and returns a code plus public URLs. |
+| `get_shared_content` | Reads a share: full text for text shares; inline content for small text-like files up to 100 KB; metadata and a download link for large or binary files; a file listing for folders. |
+| `get_shared_file` | Metadata only (type, name, size, expiry, password flag) plus the public download URL; never file bytes. |
+| `check_share` | Read-only existence/metadata check; reports missing, expired, and password-protected states. |
+
+Shared rules for all tools:
+
+- **Expiry** accepts `1h`, `12h`, `24h`, `72h`, `168h` and friendly aliases (`1 hour`, `1d`, `1 day`, `tomorrow`, `3d`, `3 days`, `7d`, `1 week`); default 24 hours. Unknown values are rejected with the accepted list.
+- **No passwords through MCP.** Password-protected shares are created and opened only on the website. Reads of an encrypted share return metadata, `is_encrypted: true`, and instructions to open the share URL in a browser — never ciphertext, salt, or IV.
+- Missing and expired codes are deliberately indistinguishable (`Share not found or expired.`), and no tool can delete, list, or enumerate shares.
+- Codes follow the same 3–20 alphanumeric validation as the website. Storage-provider URLs and database details are never returned; links are always the public `/share/` and `/download/` pages.
+
+### Testing
+
+```bash
+python -m unittest test_mcp -v
+```
+
+`test_download.py` covers the website and `test_mcp.py` covers the MCP endpoint; `python -m unittest discover -v` runs both. Local verification of a real storage roundtrip through `/mcp` requires reachable providers: Litterbox has previously returned HTTP 403 for some networks.
+
 ## Render Free + Neon Free
 
 The Render service **AlienXFileV2** is at <https://alienxfilev2.onrender.com>, linked to <https://github.com/aryankahar31/AlienXFileV2>. This configuration uses Render Free, an external Neon database, and a private Vercel Blob store on the Hobby plan, not a paid disk. Credentials belong only in the service's secret environment variables, never in the repository. Litterbox has previously returned HTTP 403; the manual option does not bypass provider restrictions. Vercel stays the default.
@@ -178,6 +228,7 @@ SQLite's short write transactions suit a small site, but writes serialize and ca
 - Expiry blocks access through this app; provider retention is separate, and neither expiry nor cancellation can recall downloaded copies. Keep your own backup of anything important. Availability can end before the selected expiry.
 - Limits are **10 upload requests per IP per 600 seconds** and **30 lookup requests per IP per 600 seconds**, using separate fixed windows stored in the configured database. Failed requests also count. A valid code-form POST followed by its redirect to the details page counts as **two lookups**; fetching its QR code or clicking the file download link counts as another. Requests beyond the allowance return 429 with `Retry-After`.
 - Each file sent from the browser queue consumes one upload request; files rejected locally do not. Users behind a shared NAT/IP share the allowance, and fixed-window limits are not a substitute for authentication or comprehensive abuse protection.
+- The MCP endpoint `POST /mcp` is off by default (`ALIENX_MCP_ENABLED=0`), has its own per-IP buckets (`MCP_RATE_LIMIT`, `MCP_LOOKUP_RATE_LIMIT`, `MCP_RATE_WINDOW`), enforces `MCP_API_KEY` when configured, and never logs request bodies. Enabling it does not change the website limits above.
 - Some executable/script filename extensions are blocked, but the app does not scan file contents for malware. Treat downloaded files as untrusted.
 - QR codes encode the details URL and use the same expiration checks and lookup rate limits. Anyone who scans one can access the share, just like anyone holding its URL.
 - Global response headers include `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, and a Content Security Policy; non-static responses use `Cache-Control: no-store`. These do not make public share codes secret. Never place database credentials or access tokens in public/global headers, share contents, or source files.

@@ -34,6 +34,9 @@ MAX_ZIP_TOTAL_BYTES = 500_000_000  # 500 MB total for ZIP downloads
 upload_max_bytes = int(os.environ.get('ALIENX_UPLOAD_MAX_BYTES', 1_000_000_000))
 if not 0 < upload_max_bytes <= 1_000_000_000:
     raise ValueError('ALIENX_UPLOAD_MAX_BYTES must be between 1 and 1000000000 for AlienXFile Storage.')
+mcp_max_upload_bytes = int(os.environ.get('MCP_MAX_UPLOAD_BYTES', 26_214_400))
+if not 0 < mcp_max_upload_bytes <= 1_000_000_000:
+    raise ValueError('MCP_MAX_UPLOAD_BYTES must be between 1 and 1000000000 bytes.')
 app.config.update(
     DATABASE=os.environ.get('ALIENX_DATABASE', str(Path(__file__).with_name('shares.sqlite3'))),
     DATABASE_URL=os.environ.get('DATABASE_URL'),
@@ -48,6 +51,15 @@ app.config.update(
     UPLOAD_RATE_LIMIT=30,
     LOOKUP_RATE_LIMIT=30,
     RATE_WINDOW_SECONDS=600,
+    # MCP endpoint (POST /mcp): off unless explicitly enabled; API key optional.
+    MCP_ENABLED=os.environ.get('ALIENX_MCP_ENABLED', '0') == '1',
+    MCP_API_KEY=os.environ.get('MCP_API_KEY', ''),
+    MCP_MAX_UPLOAD_BYTES=mcp_max_upload_bytes,
+    MCP_RATE_LIMIT=int(os.environ.get('MCP_RATE_LIMIT', 60)),
+    MCP_LOOKUP_RATE_LIMIT=int(os.environ.get('MCP_LOOKUP_RATE_LIMIT', 20)),
+    MCP_RATE_WINDOW=int(os.environ.get('MCP_RATE_WINDOW', 600)),
+    MCP_PUBLIC_BASE_URL=os.environ.get('ALIENX_PUBLIC_BASE_URL', ''),
+    MCP_ALLOWED_ORIGINS=os.environ.get('MCP_ALLOWED_ORIGINS', 'https://chatgpt.com,https://chat.openai.com'),
     LITTERBOX_PROXY_URL=os.environ.get('LITTERBOX_PROXY_URL', ''),
     LITTERBOX_PROXY_SECRET=os.environ.get('LITTERBOX_PROXY_SECRET', ''),
     TRUST_PYTHONANYWHERE_PROXY=os.environ.get('ALIENX_PYTHONANYWHERE') == '1',
@@ -205,20 +217,41 @@ def cleanup_shares():
 def error_response(message, status):
     if request.path in ('/upload', '/upload-folder', '/upload-litterbox', '/bulk-download', '/api/url-meta'):
         return jsonify(success=False, uploads=[], errors=[], error=message), status
+    if request.path == '/mcp':
+        # MCP clients only understand JSON-RPC, never the website's HTML error page.
+        _, cached = request.environ.get('ALIENX_MCP_BODY', (None, None))
+        code = -32603 if status >= 500 else -32600
+        return jsonify({'jsonrpc': '2.0', 'id': mcp_rpc_id(cached),
+                        'error': {'code': code, 'message': message}}), status
     return render_template('download.html', error=message), status
 
 
 @app.before_request
 def limit_requests():
+    payload = None
     if request.endpoint in {'upload', 'upload_folder', 'upload_litterbox'}:
         action, limit = 'upload', app.config['UPLOAD_RATE_LIMIT']
+        window = app.config['RATE_WINDOW_SECONDS']
     elif request.endpoint in {'download_details', 'download_direct', 'share_qr',
                               'bulk_download', 'download_folder_file', 'download_folder_zip'} or (
         request.endpoint == 'download_page' and request.method == 'POST'
     ):
         action, limit = 'lookup', app.config['LOOKUP_RATE_LIMIT']
+        window = app.config['RATE_WINDOW_SECONDS']
         if request.method == 'POST':
             request.max_content_length = 4096
+    elif request.path == '/mcp' and request.method == 'POST' and app.config.get('MCP_ENABLED'):
+        if request.mimetype != 'application/json':
+            return  # The /mcp view answers 415 without reading the body.
+        body_status, payload = mcp_request_payload()
+        if body_status == 'too_large':
+            return mcp_rpc_error(-32600, 'Request body too large.', status=413)
+        params = payload.get('params') if isinstance(payload, dict) else None
+        tool = params.get('name') if isinstance(params, dict) else None
+        lookup = isinstance(tool, str) and tool in LOOKUP_TOOLS
+        action = 'mcp_lookup' if lookup else 'mcp'
+        limit = app.config['MCP_LOOKUP_RATE_LIMIT' if lookup else 'MCP_RATE_LIMIT']
+        window = app.config['MCP_RATE_WINDOW']
     else:
         return
     address = request.remote_addr or 'unknown'
@@ -233,11 +266,13 @@ def limit_requests():
     except ValueError:
         address = 'unknown'
     now = time.time()
-    window = app.config['RATE_WINDOW_SECONDS']
     db = get_db()
     # ponytail: per-IP fixed windows allow boundary bursts/shared-IP contention; use a gateway limiter at scale.
     with transaction(db):
-        query(db, 'DELETE FROM rate_limits WHERE started <= ?', (now - window,))
+        # Per-action prune keeps stricter MCP windows exact; the global prune retires idle actions.
+        query(db, 'DELETE FROM rate_limits WHERE started <= ? AND action = ?', (now - window, action))
+        query(db, 'DELETE FROM rate_limits WHERE started <= ?',
+              (now - max(app.config['RATE_WINDOW_SECONDS'], app.config['MCP_RATE_WINDOW']),))
         query(db, '''INSERT INTO rate_limits VALUES (?, ?, ?, 1)
                       ON CONFLICT(ip, action) DO UPDATE SET hits = rate_limits.hits + 1''',
                    (address, action, now))
@@ -245,6 +280,9 @@ def limit_requests():
                          (address, action)).fetchone()
     if row['hits'] > limit:
         retry = max(1, int(row['started'] + window - now) + 1)
+        if action.startswith('mcp'):
+            return mcp_rpc_error(-32005, f'Rate limit exceeded. Try again in {retry} seconds.',
+                                 mcp_rpc_id(payload), 429, {'Retry-After': str(retry)})
         body, status = error_response(f'Too many requests. Try again in {retry} seconds.', 429)
         return body, status, {'Retry-After': str(retry)}
 
@@ -971,3 +1009,10 @@ def http_error(exc):
 def database_error(exc):
     logger.error('Share database unavailable (%s)', type(exc).__name__)
     return error_response('Share storage is temporarily unavailable. Please try again later.', 503)
+
+
+# MCP blueprint imported last: mcp.py imports flask_app at its own end, so the
+# circular reference resolves here once every flask_app name it needs exists.
+from mcp import LOOKUP_TOOLS, mcp_bp, mcp_rpc_error, mcp_rpc_id, mcp_request_payload  # noqa: E402
+
+app.register_blueprint(mcp_bp)
