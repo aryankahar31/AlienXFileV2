@@ -64,7 +64,10 @@ INVALID_CODE_MESSAGE = ('Invalid share code: must be 3-20 letters or numbers '
                         '(for example "12345").')
 MAX_FILENAME = 255
 BODY_OVERHEAD_BYTES = 65_536
-DEFAULT_MCP_MAX_UPLOAD_BYTES = 26_214_400
+DEFAULT_MCP_MAX_UPLOAD_BYTES = 5_242_880
+DEFAULT_DAILY_BYTES_PER_IP = 52_428_800
+DEFAULT_GLOBAL_DAILY_BYTES = 314_572_800
+DEFAULT_DAILY_BYTES_WINDOW = 86_400
 
 # Friendly aliases accepted for the expires_in argument -> canonical keys of
 # flask_app.expire_seconds. Anything else is rejected with EXPIRY_HELP.
@@ -714,6 +717,86 @@ def _oversize_message(max_bytes):
             f'the website at {WEBSITE_URL} instead, then give me the share code it returns.')
 
 
+# ── MCP daily byte budgets ───────────────────────────────────────────────────
+# Two rate_limits rows per 24 h window hold accumulated uploaded bytes in
+# `hits`: one for the caller's IP and one global row (ip '*'). The website
+# limiter's global prune skips this action, so each row lives until it is
+# replaced by this code's own window prune (started <= now - window).
+
+BYTES_ACTION = 'mcp_bytes'
+GLOBAL_BYTES_IP = '*'
+CAPACITY_MESSAGE = ('MCP daily capacity reached; please use the website '
+                    + WEBSITE_URL + ' or try again later')
+
+
+def _bytes_window():
+    return int(current_app.config.get('MCP_DAILY_BYTES_WINDOW', DEFAULT_DAILY_BYTES_WINDOW))
+
+
+def _bytes_cap(scope):
+    if scope == 'global':
+        return max(0, int(current_app.config.get('MCP_GLOBAL_DAILY_BYTES',
+                                                 DEFAULT_GLOBAL_DAILY_BYTES)))
+    return max(0, int(current_app.config.get('MCP_DAILY_BYTES_PER_IP',
+                                             DEFAULT_DAILY_BYTES_PER_IP)))
+
+
+def _byte_rows(db, now):
+    """Fresh (ip -> bytes) budget rows inside the current window."""
+    rows = flask_app.query(db, 'SELECT ip, hits FROM rate_limits WHERE action = ? AND started > ?',
+                           (BYTES_ACTION, now - _bytes_window())).fetchall()
+    return {row['ip']: row['hits'] for row in rows}
+
+
+def _ensure_daily_capacity():
+    """Fail fast before a download when either budget is already exhausted."""
+    now = flask_app.time.time()
+    rows = _byte_rows(flask_app.get_db(), now)
+    if (rows.get(GLOBAL_BYTES_IP, 0) >= _bytes_cap('global')
+            or rows.get(flask_app.client_address(), 0) >= _bytes_cap('ip')):
+        raise ToolError(CAPACITY_MESSAGE)
+
+
+def _add_daily_bytes(db, n, now):
+    """Add n bytes to both budget rows; return (per-ip, global) totals."""
+    ip = flask_app.client_address()
+    flask_app.query(db, 'DELETE FROM rate_limits WHERE action = ? AND started <= ?',
+                    (BYTES_ACTION, now - _bytes_window()))
+    for target in (ip, GLOBAL_BYTES_IP):
+        flask_app.query(db, '''INSERT INTO rate_limits VALUES (?, ?, ?, ?)
+                               ON CONFLICT(ip, action) DO UPDATE SET hits = rate_limits.hits + ?''',
+                        (target, BYTES_ACTION, now, n, n))
+    rows = _byte_rows(db, now)
+    return rows.get(ip, 0), rows.get(GLOBAL_BYTES_IP, 0)
+
+
+def _reserve_daily_bytes(n):
+    """Count n bytes before storage. Over-cap adds roll back and raise, so a
+    rejected share never consumes budget."""
+    if n <= 0:
+        return
+    db = flask_app.get_db()
+    now = flask_app.time.time()
+    with flask_app.transaction(db):
+        per_ip, total = _add_daily_bytes(db, n, now)
+        if per_ip > _bytes_cap('ip') or total > _bytes_cap('global'):
+            raise ToolError(CAPACITY_MESSAGE)
+
+
+def _charge_daily_bytes(n):
+    """Like _reserve_daily_bytes, but the usage commits first: downloaded bytes
+    count toward the budget even when the stored share never gets created."""
+    if n <= 0:
+        return
+    db = flask_app.get_db()
+    now = flask_app.time.time()
+    with flask_app.transaction(db):
+        per_ip, total = _add_daily_bytes(db, n, now)
+        over = per_ip > _bytes_cap('ip') or total > _bytes_cap('global')
+    if over:
+        raise ToolError(CAPACITY_MESSAGE)
+
+
 # ── ChatGPT file params (openai/fileParams) ──────────────────────────────────
 
 def _file_host_suffixes():
@@ -870,12 +953,15 @@ def _tool_upload_file(args):
         # Validate shape and name first so a blocked extension fails before any download.
         _, file_name = _parse_file_param(file_ref)
         filename = _sanitize_filename(file_name) if file_name is not None else 'attachment'
+        _ensure_daily_capacity()
         data, _ = _fetch_chatgpt_file(file_ref, max_bytes)
+        _charge_daily_bytes(len(data))
     else:
         raw_name = _require_string(args, 'filename')
         content_b64 = _require_string(args, 'content_base64')
         filename = _sanitize_filename(raw_name)
         data = _decode_base64(content_b64, max_bytes)
+        _reserve_daily_bytes(len(data))
     form = {'mode': 'file', 'storageProvider': 'vercel', 'expire': expiry,
             'file': (BytesIO(data), filename)}
     if custom_code:
@@ -906,6 +992,7 @@ def _tool_share_text(args):
         raise ToolError('Text cannot contain null characters.')
     expiry = _normalize_expiry(args.get('expires_in'))
     custom_code = _custom_code(args.get('custom_code'))
+    _reserve_daily_bytes(len(normalized.encode('utf-8')))
     form = {'mode': 'text', 'text': normalized, 'expire': expiry}
     if custom_code:
         form['customKey'] = custom_code

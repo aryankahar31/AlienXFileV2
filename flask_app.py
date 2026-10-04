@@ -34,9 +34,20 @@ MAX_ZIP_TOTAL_BYTES = 500_000_000  # 500 MB total for ZIP downloads
 upload_max_bytes = int(os.environ.get('ALIENX_UPLOAD_MAX_BYTES', 1_000_000_000))
 if not 0 < upload_max_bytes <= 1_000_000_000:
     raise ValueError('ALIENX_UPLOAD_MAX_BYTES must be between 1 and 1000000000 for AlienXFile Storage.')
-mcp_max_upload_bytes = int(os.environ.get('MCP_MAX_UPLOAD_BYTES', 26_214_400))
+mcp_max_upload_bytes = int(os.environ.get('MCP_MAX_UPLOAD_BYTES', 5_242_880))
 if not 0 < mcp_max_upload_bytes <= 1_000_000_000:
     raise ValueError('MCP_MAX_UPLOAD_BYTES must be between 1 and 1000000000 bytes.')
+mcp_daily_bytes_per_ip = int(os.environ.get('MCP_DAILY_BYTES_PER_IP', 52_428_800))
+mcp_global_daily_bytes = int(os.environ.get('MCP_GLOBAL_DAILY_BYTES', 314_572_800))
+if mcp_daily_bytes_per_ip < 0 or mcp_global_daily_bytes < 0:
+    raise ValueError('MCP_DAILY_BYTES_PER_IP and MCP_GLOBAL_DAILY_BYTES must be >= 0.')
+mcp_daily_bytes_window = int(os.environ.get('MCP_DAILY_BYTES_WINDOW', 86_400))
+if mcp_daily_bytes_window < 60:
+    raise ValueError('MCP_DAILY_BYTES_WINDOW must be at least 60 seconds.')
+support_email = os.environ.get('ALIENX_SUPPORT_EMAIL', '').strip()
+if support_email and not re.fullmatch(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}', support_email):
+    logger.warning('ALIENX_SUPPORT_EMAIL is not a valid address; support pages will hide it.')
+    support_email = ''
 app.config.update(
     DATABASE=os.environ.get('ALIENX_DATABASE', str(Path(__file__).with_name('shares.sqlite3'))),
     DATABASE_URL=os.environ.get('DATABASE_URL'),
@@ -58,6 +69,10 @@ app.config.update(
     MCP_RATE_LIMIT=int(os.environ.get('MCP_RATE_LIMIT', 60)),
     MCP_LOOKUP_RATE_LIMIT=int(os.environ.get('MCP_LOOKUP_RATE_LIMIT', 20)),
     MCP_RATE_WINDOW=int(os.environ.get('MCP_RATE_WINDOW', 600)),
+    MCP_DAILY_BYTES_PER_IP=mcp_daily_bytes_per_ip,
+    MCP_GLOBAL_DAILY_BYTES=mcp_global_daily_bytes,
+    MCP_DAILY_BYTES_WINDOW=mcp_daily_bytes_window,
+    SUPPORT_EMAIL=support_email,
     MCP_PUBLIC_BASE_URL=os.environ.get('ALIENX_PUBLIC_BASE_URL', ''),
     MCP_ALLOWED_ORIGINS=os.environ.get('MCP_ALLOWED_ORIGINS', 'https://chatgpt.com,https://chat.openai.com'),
     LITTERBOX_PROXY_URL=os.environ.get('LITTERBOX_PROXY_URL', ''),
@@ -151,7 +166,8 @@ def template_settings():
                 site_url=SITE_URL,
                 upload_limit_label='1 GB' if limit >= 1_000_000_000 else f'{limit / 1_000_000:g} MB',
                 max_text_length=app.config['MAX_TEXT_LENGTH'], banned_exts=sorted(banned_exts),
-                storage_provider='Vercel Blob and Litterbox')
+                storage_provider='Vercel Blob and Litterbox',
+                support_email=app.config['SUPPORT_EMAIL'])
 
 
 def blob_headers():
@@ -226,6 +242,21 @@ def error_response(message, status):
     return render_template('download.html', error=message), status
 
 
+def client_address():
+    """Client IP used for rate limiting, from the direct address or the trusted proxy header."""
+    address = request.remote_addr or 'unknown'
+    if app.config['TRUST_RENDER_PROXY']:
+        # Render's public Cloudflare ingress overwrites this header. Do not trust arbitrary XFF entries.
+        address = request.headers.get('CF-Connecting-IP', '')
+    elif app.config['TRUST_PYTHONANYWHERE_PROXY']:
+        # PythonAnywhere sets X-Real-IP. Never enable this on a directly exposed server.
+        address = request.headers.get('X-Real-IP', address)
+    try:
+        return str(ipaddress.ip_address(address))
+    except ValueError:
+        return 'unknown'
+
+
 @app.before_request
 def limit_requests():
     payload = None
@@ -254,24 +285,16 @@ def limit_requests():
         window = app.config['MCP_RATE_WINDOW']
     else:
         return
-    address = request.remote_addr or 'unknown'
-    if app.config['TRUST_RENDER_PROXY']:
-        # Render's public Cloudflare ingress overwrites this header. Do not trust arbitrary XFF entries.
-        address = request.headers.get('CF-Connecting-IP', '')
-    elif app.config['TRUST_PYTHONANYWHERE_PROXY']:
-        # PythonAnywhere sets X-Real-IP. Never enable this on a directly exposed server.
-        address = request.headers.get('X-Real-IP', address)
-    try:
-        address = str(ipaddress.ip_address(address))
-    except ValueError:
-        address = 'unknown'
+    address = client_address()
     now = time.time()
     db = get_db()
     # ponytail: per-IP fixed windows allow boundary bursts/shared-IP contention; use a gateway limiter at scale.
     with transaction(db):
-        # Per-action prune keeps stricter MCP windows exact; the global prune retires idle actions.
+        # Per-action prune keeps stricter MCP windows exact; the global prune retires idle
+        # actions but never the 24 h MCP byte-budget rows (they prune themselves).
         query(db, 'DELETE FROM rate_limits WHERE started <= ? AND action = ?', (now - window, action))
-        query(db, 'DELETE FROM rate_limits WHERE started <= ?',
+        query(db, '''DELETE FROM rate_limits
+                     WHERE started <= ? AND action <> 'mcp_bytes' ''',
               (now - max(app.config['RATE_WINDOW_SECONDS'], app.config['MCP_RATE_WINDOW']),))
         query(db, '''INSERT INTO rate_limits VALUES (?, ?, ?, 1)
                       ON CONFLICT(ip, action) DO UPDATE SET hits = rate_limits.hits + 1''',
@@ -304,7 +327,10 @@ def response_headers(response):
     if request.endpoint != 'static':
         response.headers['Cache-Control'] = 'no-store'
     # Let crawlers read noindex; robots.txt must not block these private routes.
-    if request.endpoint not in {'index', 'robots', 'sitemap', 'static'} or response.status_code >= 400:
+    # The public legal/support pages (and the homepage) stay indexable.
+    public_endpoints = {'index', 'robots', 'sitemap', 'static',
+                        'privacy_page', 'terms_page', 'support_page'}
+    if request.endpoint not in public_endpoints or response.status_code >= 400:
         response.headers['X-Robots-Tag'] = 'noindex, nofollow, noarchive'
     return response
 
@@ -385,6 +411,29 @@ def indexnow_key():
 @app.route('/googled943441d68fdfc65.html')
 def google_site_verification():
     return send_from_directory(app.root_path, 'googled943441d68fdfc65.html')
+
+
+@app.route('/.well-known/openai-apps-challenge')
+def openai_apps_challenge():
+    # Domain-verification token for ChatGPT app-directory submission: exact
+    # env value as plain text, nothing else on this path (404 while unset).
+    token = os.environ.get('OPENAI_APPS_CHALLENGE_TOKEN', '').strip()
+    return Response(token, status=200 if token else 404, mimetype='text/plain')
+
+
+@app.route('/privacy')
+def privacy_page():
+    return render_template('privacy.html')
+
+
+@app.route('/terms')
+def terms_page():
+    return render_template('terms.html')
+
+
+@app.route('/support')
+def support_page():
+    return render_template('support.html')
 
 
 @app.route('/download', methods=['GET', 'POST'])

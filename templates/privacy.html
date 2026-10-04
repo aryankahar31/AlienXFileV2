@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    {% set page_title = 'AlienXFile - Privacy Policy' %}
+    <title>{{ page_title }}</title>
+    <meta name="description" content="How AlienXFile stores, protects, and deletes shared files and text, and which service providers process data.">
+    <meta name="robots" content="index, follow">
+    <link rel="canonical" href="{{ site_url }}privacy">
+    <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}" type="image/svg+xml">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <style>
+        .doc h2 { font-size: 17px; font-weight: 700; margin: 26px 0 8px; }
+        .doc h2:first-child { margin-top: 0; }
+        .doc p, .doc li { font-size: 14px; line-height: 1.6; color: #444; margin-bottom: 10px; }
+        .doc ul { padding-left: 22px; margin-bottom: 12px; }
+        .doc li { margin-bottom: 6px; }
+        .doc strong { color: #111; }
+        .doc-meta { text-align: center; color: #888; font-size: 12px; margin-bottom: 4px; }
+        .doc-links { text-align: center; font-size: 13px; margin-top: 4px; }
+        .doc-links a { margin: 0 8px; }
+        body.dark .doc p, body.dark .doc li { color: #adbac7; }
+        body.dark .doc strong { color: #e6edf3; }
+        body.dark .doc-meta { color: #768390; }
+    </style>
+</head>
+<body>
+    <main class="card">
+        <h1>Privacy Policy</h1>
+        <p class="doc-meta">AlienXFile — temporary file and text sharing. Last updated 4 October 2026.</p>
+        <div class="doc">
+            <h2>Overview</h2>
+            <p>AlienXFile is a temporary file and text sharing service. It has <strong>no accounts,
+            no sign-up, and no login</strong>. You share content and receive a short code; anyone who
+            has the code or link can open the share until it expires. This page explains what is
+            stored, who processes it, and how long it is kept.</p>
+
+            <h2>What we store</h2>
+            <ul>
+                <li><strong>Share records</strong> in our database (PostgreSQL, operated by Neon):
+                    the share code (a random short code or one you chose), the type (file, folder or
+                    text), the file name, the size, the chosen expiry time, and where the file bytes
+                    are stored. Folder shares also store the list of file names, sizes and storage
+                    links.</li>
+                <li><strong>Text shares</strong>: the text itself is stored server-side, unless you
+                    password-protect it (see below). Text is limited to {{ "{:,}".format(max_text_length) }}
+                    characters.</li>
+                <li><strong>File bytes</strong>: files are <em>not</em> stored in the database.
+                    They are uploaded to the storage providers listed under &ldquo;Service
+                    providers&rdquo;. Website files are up to 1 GB per file.</li>
+                <li><strong>Password-protected shares</strong>: only encrypted content plus a random
+                    salt and IV — never your password.</li>
+            </ul>
+
+            <h2>Password protection</h2>
+            <p>If you set a password on the website, your browser encrypts the content
+            <strong>before it leaves your device</strong> using AES-GCM (256-bit) with a key derived
+            from your password by PBKDF2 (SHA-256, 100,000 iterations). The server receives only the
+            encrypted content, the salt and the IV. <strong>The password itself is never sent to the
+            server.</strong> We cannot recover a lost password, and we never see the plaintext of a
+            password-protected share. Passwords are not accepted through the ChatGPT integration.</p>
+
+            <h2>Expiry and deletion</h2>
+            <ul>
+                <li>Every share expires after the lifetime chosen at upload: <strong>1 hour,
+                    12 hours, 1 day or 3 days</strong> on the website, and up to <strong>7 days</strong>
+                    through the ChatGPT integration.</li>
+                <li>Expired shares can no longer be opened; this happens as soon as the expiry time
+                    passes.</li>
+                <li>Database records and stored files are removed during cleanup, which runs as the
+                    service processes activity. Third-party temporary storage removes its files when
+                    their lifetime ends.</li>
+                <li>Shares are temporary — not a backup. Keep your own copy of anything important.</li>
+            </ul>
+
+            <h2>IP addresses and rate limiting</h2>
+            <p>We use IP addresses only to limit abuse:</p>
+            <ul>
+                <li>Short request-rate windows per IP (by default 30 uploads and 30 lookups per
+                    10 minutes on the website, with separate limits for the ChatGPT integration).
+                    These rows keep an IP address only for about <strong>10 minutes</strong>.</li>
+                <li>Daily upload-volume budgets for the ChatGPT integration (by default 50 MiB per
+                    IP per day and 300 MiB in total per day). These counters keep an IP address for
+                    up to <strong>24 hours</strong>.</li>
+            </ul>
+            <p>IP addresses are not used for analytics, advertising or profiling, and are not shared
+            with the storage providers.</p>
+
+            <h2>Logs</h2>
+            <p>We keep operational server logs on our host so the service can be monitored and
+            debugged. They contain event messages such as errors, storage-provider failures,
+            rate-limit events and blocked download hosts (host name only). <strong>We do not log
+            share contents, passwords, request bodies, or signed storage URLs.</strong> Logs are
+            retained by our hosting provider according to its platform settings.</p>
+
+            <h2>Service providers that process data</h2>
+            <ul>
+                <li><strong>Render</strong> — application hosting (Singapore region) and log
+                    delivery; receives all requests to this site.</li>
+                <li><strong>Neon</strong> — PostgreSQL database; receives share records.</li>
+                <li><strong>Vercel Blob</strong> — private file storage; receives file bytes for
+                    normal uploads.</li>
+                <li><strong>Litterbox (catbox.moe)</strong> — third-party temporary file storage;
+                    receives file bytes for large or legacy uploads, and deletes them when their
+                    lifetime ends.</li>
+                <li><strong>Our upload proxy (alienxfile-proxy.fly.dev, Fly.io)</strong> — routes
+                    some Litterbox uploads; sees the file bytes it forwards.</li>
+                <li><strong>OpenAI (ChatGPT)</strong> — when you use the ChatGPT integration, OpenAI
+                    sends tool requests to this service, and this service downloads files you
+                    attached in ChatGPT from OpenAI-provided temporary addresses
+                    (oaiusercontent.com / openai.com).</li>
+                <li><strong>Google Fonts</strong> — pages request fonts from Google Fonts
+                    (fonts.googleapis.com / fonts.gstatic.com), which receives your IP address.</li>
+            </ul>
+            <p>We do not sell data, and there are <strong>no ads and no analytics</strong> on this
+            site. We do not set cookies. Dark-mode preference and upload history are stored only in
+            your own browser (localStorage).</p>
+
+            <h2>Your choices</h2>
+            <ul>
+                <li>Pick the shortest lifetime that works for your share.</li>
+                <li>Use password protection for anything sensitive — the server never sees the
+                    password or plaintext.</li>
+                <li>Remember that a code is not encryption: anyone with the code can read a
+                    non-password-protected share until it expires, so avoid sharing sensitive
+                    content you would not want a link holder to see.</li>
+                <li>Questions, or a request to remove a share you know the code for: use the
+                    <a href="/support">Support page</a>.</li>
+            </ul>
+
+            <h2>Children</h2>
+            <p>The service is intended for people aged 13 and over, as described in the
+            <a href="/terms">Terms of Service</a>.</p>
+
+            <h2>Changes</h2>
+            <p>We may update this policy; the date at the top shows when it last changed. Continued
+            use of the service after a change means you accept the updated policy.</p>
+
+            <h2>Contact</h2>
+            <p>See the <a href="/support">Support page</a> for contact options and how to report
+            abuse.</p>
+        </div>
+        <hr class="divider">
+        <p class="doc-links">
+            <a href="/">Home</a>
+            <a href="/privacy">Privacy</a>
+            <a href="/terms">Terms</a>
+            <a href="/support">Support</a>
+        </p>
+    </main>
+    <script>
+        if (localStorage.getItem('alienxfile_dark') === 'true' ||
+            (!localStorage.getItem('alienxfile_dark') && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+            document.body.classList.add('dark');
+        }
+    </script>
+</body>
+</html>

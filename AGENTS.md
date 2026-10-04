@@ -29,14 +29,15 @@ Temporary file and text sharing platform with dual storage (Vercel Blob default 
 | `templates/index.html` | Upload page — file/folder/text modes, advanced options |
 | `templates/download.html` | Download page — preview system, lightbox, countdown, decryption |
 | `test_download.py` | 40 tests, all passing |
-| `mcp.py` | MCP blueprint — stateless JSON-RPC 2.0 at `POST /mcp` (5 tools, Phase 1 auth) |
-| `test_mcp.py` | 26 MCP tests, all passing |
+| `mcp.py` | MCP blueprint — stateless JSON-RPC 2.0 at `POST /mcp` (5 tools, Phase 1 auth, daily byte budgets) |
+| `test_mcp.py` | 53 MCP tests, all passing |
+| `test_pages.py` | 7 tests for /privacy /terms /support + challenge route, all passing |
 | `render.yaml` | Render Blueprint config |
 | `pa_proxy/app.py` | Fly.io proxy app |
 | `pa_proxy/fly.toml` | Fly.io config |
 | `README.md` | Documentation |
 
-## Features Implemented (39 → 66 tests)
+## Features Implemented (39 → 107 tests)
 
 ### Core Features
 1. Paste text/files
@@ -102,7 +103,13 @@ Temporary file and text sharing platform with dual storage (Vercel Blob default 
 41. **Protocol errors**: `-32700` 400 parse, `-32600` 400/413/415/403/405, `-32601` 200 unknown method, `-32602` 200 invalid params, `-32001` 401 auth, `-32005` 429; tool failures are `isError: true` results
 42. **Expiry validation**: `1h|12h|24h|72h|168h` + aliases (`1 hour`, `1d`, `1 day`, `tomorrow`, `3d`, `3 days`, `7d`, `1 week`), default 24h, unknown values rejected with help text
 43. **Privacy**: encrypted shares return metadata + `is_encrypted` + website instructions only (never ciphertext/salt/IV, no password params); uniform `Share not found or expired.` for missing vs expired; no delete/list/enumerate tools; storage URLs and DB details never returned (`ALIENX_PUBLIC_BASE_URL` builds `/share/` + `/download/` links)
-44. **Upload limits**: base64-only, `MCP_MAX_UPLOAD_BYTES` (25 MiB default) decoded cap with website fallback message; request body capped (413); banned extensions and `..` traversal rejected; directory components stripped
+44. **Upload limits**: base64-only, `MCP_MAX_UPLOAD_BYTES` (5 MiB default) decoded cap with website fallback message; request body capped (413); banned extensions and `..` traversal rejected; directory components stripped
+
+### Directory Prep (NEW)
+45. **Daily byte budgets**: MCP writes consume `rate_limits` rows with action `mcp_bytes` (per-IP row + global row ip `'*'`, bytes in `hits`); `_ensure_daily_capacity()` fails fast before ChatGPT file downloads, `_reserve_daily_bytes()` rolls back over-cap adds (share_text UTF-8 + base64 decoded), `_charge_daily_bytes()` commits downloaded bytes then reports over-cap; reads are never metered; global rate-limit prune skips `mcp_bytes` (`action <> 'mcp_bytes'`); exact error `MCP daily capacity reached; please use the website …`
+46. **Trust pages**: `/privacy`, `/terms`, `/support` (new templates, `.card` style, dark-mode script, indexable + canonical, sitemap untouched) — fact-checked content only; support contact shown only when `ALIENX_SUPPORT_EMAIL` is set and valid
+47. **Challenge route**: `GET /.well-known/openai-apps-challenge` returns `OPENAI_APPS_CHALLENGE_TOKEN` as exact `text/plain`, 404 with empty body while unset; stays noindex
+48. **`client_address()`** extracted from `limit_requests` so MCP byte accounting reuses the exact trusted-proxy IP logic
 
 ## All Validation Patterns
 - **Custom codes**: `[A-Za-z0-9]{3,20}` (backend + frontend + download page input)
@@ -124,15 +131,18 @@ Temporary file and text sharing platform with dual storage (Vercel Blob default 
 10. `renderUpload()` key validation: `^\d{5}$` → `^[A-Za-z0-9]{3,20}$`
 
 ## Testing
-- 66 tests passing: `python3 test_download.py` (40) + `python3 test_mcp.py` (26), or `python3 -m unittest discover -v`
+- 107 tests passing (100 run + 7 skipped): `python3 -m unittest discover -v` → `test_download.py` (40) + `test_mcp.py` (53) + `test_pages.py` (7) + `test_postgres.py` (7, skips without `ALIENX_TEST_DATABASE_URL`)
 - Website tests cover: upload, download, text, file, folder, encryption, rate limiting, CSP headers, QR codes, preview endpoint, custom codes, dark mode, template escaping
-- MCP tests cover: handshake, tools/list schema, all 5 tools, expiry aliases, auth (missing/wrong/right key), disabled 404, rate buckets, JSON-RPC error matrix, 413/415/403/405, DB-failure JSON shape, encrypted-share no-ciphertext, no-secrets sweep
+- MCP tests cover: handshake, tools/list schema, all 5 tools, expiry aliases, auth (missing/wrong/right key), disabled 404, rate buckets, daily byte budgets (per-IP + global, fail-closed DB path, window reset), JSON-RPC error matrix, 413/415/403/405, DB-failure JSON shape, encrypted-share no-ciphertext, no-secrets sweep
+- Pages tests cover: DB-free rendering, indexable headers/canonicals, fact-checked privacy/terms content, support email gating, challenge token exact-by-body/plain-text behavior, discovery untouched
 
 ## MCP Environment Variables (Step 7 — deploy when enabling)
 - `ALIENX_MCP_ENABLED` (default `"0"` — off; set `1` in Render dashboard to enable)
 - `MCP_API_KEY` (sync: false — set a long random value; empty = anonymous dev mode)
 - `ALIENX_PUBLIC_BASE_URL` (default `https://alienxfilev2.onrender.com`)
-- `MCP_MAX_UPLOAD_BYTES` (26214400), `MCP_RATE_LIMIT` (60), `MCP_LOOKUP_RATE_LIMIT` (20), `MCP_RATE_WINDOW` (600), `MCP_ALLOWED_ORIGINS` (chatgpt.com + chat.openai.com)
+- `MCP_MAX_UPLOAD_BYTES` (5242880 = 5 MiB), `MCP_RATE_LIMIT` (60), `MCP_LOOKUP_RATE_LIMIT` (20), `MCP_RATE_WINDOW` (600), `MCP_ALLOWED_ORIGINS` (chatgpt.com + chat.openai.com)
+- `MCP_DAILY_BYTES_PER_IP` (52428800 = 50 MiB), `MCP_GLOBAL_DAILY_BYTES` (314572800 = 300 MiB), `MCP_DAILY_BYTES_WINDOW` (86400, min 60) — daily byte budgets in `rate_limits` action `mcp_bytes`
+- `ALIENX_SUPPORT_EMAIL` (empty = hide contact on /support; invalid values rejected at startup-ish via warning), `OPENAI_APPS_CHALLENGE_TOKEN` (empty = challenge route 404)
 - `render.yaml` already lists `ALIENX_MCP_ENABLED=0`, `MCP_API_KEY` (sync: false), `ALIENX_PUBLIC_BASE_URL`
 
 ## Git History (Recent)

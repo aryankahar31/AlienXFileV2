@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    {% set page_title = 'AlienXFile - Support' %}
+    <title>{{ page_title }}</title>
+    <meta name="description" content="How to contact AlienXFile support and report abuse or copyright issues.">
+    <meta name="robots" content="index, follow">
+    <link rel="canonical" href="{{ site_url }}support">
+    <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}" type="image/svg+xml">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <style>
+        .doc h2 { font-size: 17px; font-weight: 700; margin: 26px 0 8px; }
+        .doc h2:first-child { margin-top: 0; }
+        .doc p, .doc li { font-size: 14px; line-height: 1.6; color: #444; margin-bottom: 10px; }
+        .doc ul { padding-left: 22px; margin-bottom: 12px; }
+        .doc li { margin-bottom: 6px; }
+        .doc strong { color: #111; }
+        .doc-meta { text-align: center; color: #888; font-size: 12px; margin-bottom: 4px; }
+        .doc-links { text-align: center; font-size: 13px; margin-top: 4px; }
+        .doc-links a { margin: 0 8px; }
+        .support-box {
+            border: var(--border-light); border-radius: var(--radius);
+            padding: 16px 18px; background: var(--cream); margin-bottom: 16px;
+            box-shadow: var(--shadow-sm);
+        }
+        .support-box p:last-child { margin-bottom: 0; }
+        body.dark .doc p, body.dark .doc li { color: #adbac7; }
+        body.dark .doc strong { color: #e6edf3; }
+        body.dark .doc-meta { color: #768390; }
+        body.dark .support-box { background: #0d1117; border-color: #30363d; }
+    </style>
+</head>
+<body>
+    <main class="card">
+        <h1>Support</h1>
+        <p class="doc-meta">AlienXFile — temporary file and text sharing.</p>
+        <div class="doc">
+            <h2>Contact</h2>
+            {% if support_email %}
+            <div class="support-box">
+                <p>Email us at <a href="mailto:{{ support_email }}">{{ support_email }}</a>.
+                We read every message, but replies may take some time — the service is run by a
+                small team.</p>
+            </div>
+            {% else %}
+            <div class="support-box">
+                <p>A direct contact address is not published at the moment. Please check back
+                later.</p>
+            </div>
+            {% endif %}
+
+            <h2>Report abuse</h2>
+            <p>To report illegal content, malware, copyright infringement, or any other content
+            that breaks the <a href="/terms">Terms of Service</a>, contact us through the address
+            above and include:</p>
+            <ul>
+                <li>The <strong>share code(s) or link(s)</strong> of the content in question;</li>
+                <li>A short description of the problem (what the content is and why it violates
+                    the terms);</li>
+                <li>For copyright claims: identification of the copyrighted work and a statement
+                    that your report is accurate and made in good faith;</li>
+                <li>A way to reach you if we need to follow up (optional).</li>
+            </ul>
+            <p>We may remove shares that violate the terms and may restrict access for repeat
+            violations. See section 6 of the <a href="/terms">Terms of Service</a>.</p>
+
+            <h2>Lost codes and passwords</h2>
+            <p>Shares are anonymous and temporary: there are no accounts, so we cannot look up who
+            created a share. We cannot recover a lost share code or a forgotten password, and we
+            cannot open password-protected content for you. If you know a share&rsquo;s code and
+            need it removed, include the code in your message and we will consider it.</p>
+        </div>
+        <hr class="divider">
+        <p class="doc-links">
+            <a href="/">Home</a>
+            <a href="/privacy">Privacy</a>
+            <a href="/terms">Terms</a>
+            <a href="/support">Support</a>
+        </p>
+    </main>
+    <script>
+        if (localStorage.getItem('alienxfile_dark') === 'true' ||
+            (!localStorage.getItem('alienxfile_dark') && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+            document.body.classList.add('dark');
+        }
+    </script>
+</body>
+</html>

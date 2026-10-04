@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    {% set page_title = 'AlienXFile - Terms of Service' %}
+    <title>{{ page_title }}</title>
+    <meta name="description" content="Terms of Service for AlienXFile: acceptable use, temporary storage, copyright and abuse reporting.">
+    <meta name="robots" content="index, follow">
+    <link rel="canonical" href="{{ site_url }}terms">
+    <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}" type="image/svg+xml">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <style>
+        .doc h2 { font-size: 17px; font-weight: 700; margin: 26px 0 8px; }
+        .doc h2:first-child { margin-top: 0; }
+        .doc p, .doc li { font-size: 14px; line-height: 1.6; color: #444; margin-bottom: 10px; }
+        .doc ul { padding-left: 22px; margin-bottom: 12px; }
+        .doc li { margin-bottom: 6px; }
+        .doc strong { color: #111; }
+        .doc-meta { text-align: center; color: #888; font-size: 12px; margin-bottom: 4px; }
+        .doc-links { text-align: center; font-size: 13px; margin-top: 4px; }
+        .doc-links a { margin: 0 8px; }
+        body.dark .doc p, body.dark .doc li { color: #adbac7; }
+        body.dark .doc strong { color: #e6edf3; }
+        body.dark .doc-meta { color: #768390; }
+    </style>
+</head>
+<body>
+    <main class="card">
+        <h1>Terms of Service</h1>
+        <p class="doc-meta">AlienXFile — temporary file and text sharing. Last updated 4 October 2026.</p>
+        <div class="doc">
+            <h2>1. The service</h2>
+            <p>AlienXFile lets you temporarily share files, folders and text. You receive a short
+            code; anyone with the code or link can access the share until it expires. The service
+            has no accounts and does not back up your content. By using it you accept these terms.
+            If you do not accept them, do not use the service.</p>
+
+            <h2>2. Acceptable use</h2>
+            <p>You may not use AlienXFile to store or distribute content that is illegal, or that
+            infringes the rights of others. Without limiting that, the following are not allowed:</p>
+            <ul>
+                <li>Child sexual abuse material (CSAM) and any content that exploits or endangers
+                    minors;</li>
+                <li>Malware, or files intended to harm others (common executable formats are
+                    blocked by the service);</li>
+                <li>Content that infringes copyright or other intellectual property rights;</li>
+                <li>Content that violates another person&rsquo;s privacy, or that is used for
+                    harassment, fraud or other abusive purposes;</li>
+                <li>Attempting to bypass the service&rsquo;s limits, security, or rate limiting.</li>
+            </ul>
+
+            <h2>3. Temporary storage</h2>
+            <p>Shares are stored only until their chosen lifetime ends (1 hour, 12 hours, 1 day or
+            3 days on the website, up to 7 days through the ChatGPT integration). Files are held in
+            third-party temporary storage, and availability of that storage may end before the
+            share&rsquo;s expiry. <strong>The service is temporary sharing, not a backup.</strong>
+            Keep your own copy of anything important. You are responsible for having the right to
+            share whatever you upload.</p>
+
+            <h2>4. Passwords and codes</h2>
+            <p>A share code is not encryption: anyone with the code can read a share that is not
+            password-protected. Password protection encrypts content in your browser before it is
+            uploaded; the password is never sent to the server, and a lost password cannot be
+            recovered.</p>
+
+            <h2>5. Age requirement</h2>
+            <p>You must be at least <strong>13 years old</strong> to use the service. If you are
+            under the age of majority where you live, you must have permission from a parent or
+            guardian, and they accept these terms for you.</p>
+
+            <h2>6. Copyright and abuse reporting</h2>
+            <p>To report content that violates these terms — including copyright infringement —
+            use the <a href="/support">Support page</a>. Include the share code(s) or link(s), a
+            clear description of the problem, and, for copyright claims, identification of the work
+            you believe is infringed plus a statement that your report is accurate and made in good
+            faith. If you are reporting on someone else&rsquo;s behalf, confirm you are authorized
+            to do so.</p>
+            <p>We may remove content and may restrict access for repeat or serious violations. We
+            cooperate with lawful requests where we are legally required to.</p>
+
+            <h2>7. Removal of content</h2>
+            <p><strong>We may remove or disable any share at any time</strong>, for any reason,
+            including to comply with the law, respond to abuse reports, or protect the service. We
+            may also suspend access to the service for people who repeatedly break these terms.</p>
+
+            <h2>8. No warranty</h2>
+            <p>The service is provided <strong>&ldquo;as is&rdquo; and &ldquo;as available&rdquo;</strong>,
+            without warranties of any kind, whether express or implied. We do not guarantee that the
+            service will be uninterrupted, secure, or free of errors, or that any share will remain
+            available for its full lifetime. Third-party storage providers operate under their own
+            terms.</p>
+
+            <h2>9. Limitation of liability</h2>
+            <p>To the fullest extent permitted by law, the operator of the service is not liable for
+            any indirect, incidental, special or consequential damages, or for any loss of data,
+            content, profits or goodwill, arising from your use of — or inability to use — the
+            service or any share. Where liability cannot be excluded, it is limited to the amount
+            you paid to use the service (which is zero, because the service is free).</p>
+
+            <h2>10. Changes to these terms</h2>
+            <p>We may update these terms; the date at the top shows when they last changed.
+            Continued use of the service after a change means you accept the updated terms.</p>
+
+            <h2>11. Contact</h2>
+            <p>See the <a href="/support">Support page</a> for contact options and reporting
+            instructions. Our handling of personal data is described in the
+            <a href="/privacy">Privacy Policy</a>.</p>
+        </div>
+        <hr class="divider">
+        <p class="doc-links">
+            <a href="/">Home</a>
+            <a href="/privacy">Privacy</a>
+            <a href="/terms">Terms</a>
+            <a href="/support">Support</a>
+        </p>
+    </main>
+    <script>
+        if (localStorage.getItem('alienxfile_dark') === 'true' ||
+            (!localStorage.getItem('alienxfile_dark') && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+            document.body.classList.add('dark');
+        }
+    </script>
+</body>
+</html>

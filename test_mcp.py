@@ -57,7 +57,7 @@ class McpTest(unittest.TestCase):
             MAX_CONTENT_LENGTH=1_001_000_000,
             UPLOAD_RATE_LIMIT=1000, LOOKUP_RATE_LIMIT=1000, RATE_WINDOW_SECONDS=60,
             TRUST_PYTHONANYWHERE_PROXY=False, TRUST_RENDER_PROXY=False,
-            MCP_ENABLED=True, MCP_API_KEY='', MCP_MAX_UPLOAD_BYTES=26_214_400,
+            MCP_ENABLED=True, MCP_API_KEY='', MCP_MAX_UPLOAD_BYTES=5_242_880,
             MCP_RATE_LIMIT=1000, MCP_LOOKUP_RATE_LIMIT=1000, MCP_RATE_WINDOW=600,
             MCP_PUBLIC_BASE_URL='',
             MCP_ALLOWED_ORIGINS='https://chatgpt.com,https://chat.openai.com'))
@@ -80,10 +80,10 @@ class McpTest(unittest.TestCase):
         response = self.client.post('/mcp', json=body, **kwargs)
         return response, response.get_json(silent=True)
 
-    def call_tool(self, name, arguments=None, request_id=1, expect_error=None):
+    def call_tool(self, name, arguments=None, request_id=1, expect_error=None, **kwargs):
         response, payload = self.rpc('tools/call',
                                      {'name': name, 'arguments': arguments if arguments is not None else {}},
-                                     request_id)
+                                     request_id, **kwargs)
         self.assertEqual(response.status_code, 200, payload)
         self.assertNotIn('error', payload)
         result = payload['result']
@@ -1166,6 +1166,147 @@ class McpTest(unittest.TestCase):
             # Writes live in their own bucket and are unaffected.
             created = self.tool_json('share_text', {'text': 'still allowed'}, request_id=3)
             self.assertTrue(created['success'])
+
+    # ── daily byte budgets ────────────────────────────────────────────────────
+
+    def budget_rows(self):
+        with app.app_context():
+            rows = get_db().execute(
+                "SELECT ip, hits FROM rate_limits WHERE action = 'mcp_bytes'").fetchall()
+        return {row[0]: row[1] for row in rows}
+
+    def test_share_text_counts_bytes_and_rejects_over_per_ip_cap(self):
+        with patch.dict(app.config, MCP_DAILY_BYTES_PER_IP=10, MCP_GLOBAL_DAILY_BYTES=1000):
+            created = self.tool_json('share_text', {'text': 'x' * 10})
+            self.assertTrue(created['success'])
+            _, text = self.call_tool('share_text', {'text': 'y'}, expect_error=True)
+        self.assertEqual(text, mcp.CAPACITY_MESSAGE)
+        self.assertEqual(self.budget_rows(), {'127.0.0.1': 10, '*': 10})
+        self.assertNotIn('Traceback', text)
+        self.assertNotIn('rate_limits', text)
+        self.assertNotIn('disk', text)
+
+    def test_global_cap_blocks_other_ips_while_reads_keep_working(self):
+        with patch.dict(app.config, MCP_DAILY_BYTES_PER_IP=1000, MCP_GLOBAL_DAILY_BYTES=10):
+            self.tool_json('share_text', {'text': 'x' * 10})
+            _, text = self.call_tool('share_text', {'text': 'y'},
+                                     environ_base={'REMOTE_ADDR': '203.0.113.9'},
+                                     expect_error=True)
+            self.assertEqual(text, mcp.CAPACITY_MESSAGE)
+            # Reads are not metered and keep working while writes are blocked.
+            _, lookup = self.call_tool('check_share', {'code': '12345'},
+                                       environ_base={'REMOTE_ADDR': '203.0.113.9'},
+                                       expect_error=False)
+        self.assertEqual(json.loads(lookup), {'exists': False})
+        rows = self.budget_rows()
+        self.assertEqual(rows, {'127.0.0.1': 10, '*': 10})
+
+    def test_per_ip_budget_is_isolated_between_clients(self):
+        with patch.dict(app.config, MCP_DAILY_BYTES_PER_IP=8, MCP_GLOBAL_DAILY_BYTES=1000):
+            self.tool_json('share_text', {'text': 'x' * 8})
+            _, text = self.call_tool('share_text', {'text': 'y'}, expect_error=True)
+            self.assertEqual(text, mcp.CAPACITY_MESSAGE)
+            # Another client IP has its own budget and keeps working.
+            _, other = self.call_tool('share_text', {'text': 'z'},
+                                      environ_base={'REMOTE_ADDR': '203.0.113.7'},
+                                      expect_error=False)
+        self.assertTrue(json.loads(other)['success'])
+        rows = self.budget_rows()
+        self.assertEqual(rows, {'127.0.0.1': 8, '203.0.113.7': 1, '*': 9})
+
+    def test_upload_file_counts_bytes_for_base64_and_fetched_sources(self):
+        with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN,
+                        MCP_DAILY_BYTES_PER_IP=1000, MCP_GLOBAL_DAILY_BYTES=1000):
+            self.mock_blob_upload()
+            created = self.tool_json('upload_file', {
+                'filename': 'a.txt',
+                'content_base64': base64.b64encode(b'x' * 42).decode()})
+            self.assertEqual(created['size'], 42)
+            self.assertEqual(self.budget_rows()['127.0.0.1'], 42)
+            self.mock_public_dns()
+            self.mock_file_get(return_value=FakeResponse(
+                200, {'Content-Length': '7'}, [b'y' * 7]))
+            created = self.tool_json('upload_file', {'file': self._file_ref()})
+            self.assertEqual(created['size'], 7)
+        rows = self.budget_rows()
+        self.assertEqual(rows, {'127.0.0.1': 49, '*': 49})
+
+    def test_fetched_bytes_over_the_cap_commit_then_report_capacity(self):
+        with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN,
+                        MCP_DAILY_BYTES_PER_IP=1000, MCP_GLOBAL_DAILY_BYTES=40):
+            self.mock_blob_upload()
+            self.mock_public_dns()
+            self.mock_file_get(return_value=FakeResponse(
+                200, {'Content-Length': '42'}, [b'x' * 42]))
+            _, text = self.call_tool('upload_file', {'file': self._file_ref()},
+                                     expect_error=True)
+        self.assertEqual(text, mcp.CAPACITY_MESSAGE)
+        # Downloaded bytes stay billed past the cap, but no share is created.
+        self.assertEqual(self.budget_rows(), {'127.0.0.1': 42, '*': 42})
+        with app.app_context():
+            count = get_db().execute('SELECT COUNT(*) FROM shares').fetchone()[0]
+        self.assertEqual(count, 0)
+
+    def test_fetched_bytes_count_even_when_the_share_is_never_created(self):
+        self.create_share(kind='text', name='occupied', size=0,
+                          expires=self.now + 3600, content='taken', custom_key='taken1')
+        with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN,
+                        MCP_DAILY_BYTES_PER_IP=1000, MCP_GLOBAL_DAILY_BYTES=1000):
+            self.mock_blob_upload()
+            self.mock_public_dns()
+            self.mock_file_get(return_value=FakeResponse(
+                200, {'Content-Length': '42'}, [b'x' * 42]))
+            _, text = self.call_tool('upload_file', {
+                'file': self._file_ref(file_name='dup.txt'),
+                'custom_code': 'taken1'}, expect_error=True)
+        self.assertNotIn('Traceback', text)
+        # The download happened before storage failed, so the bytes stay billed.
+        self.assertEqual(self.budget_rows(), {'127.0.0.1': 42, '*': 42})
+        with app.app_context():
+            count = get_db().execute('SELECT COUNT(*) FROM shares').fetchone()[0]
+        self.assertEqual(count, 1)
+
+    def test_exhausted_budget_rejects_before_any_download_or_storage(self):
+        with patch.dict(app.config, MCP_DAILY_BYTES_PER_IP=0, MCP_GLOBAL_DAILY_BYTES=0):
+            get = self.mock_file_get()
+            _, text = self.call_tool('upload_file', {'file': self._file_ref()},
+                                     expect_error=True)
+            self.assertEqual(text, mcp.CAPACITY_MESSAGE)
+            get.assert_not_called()
+            self.post.assert_not_called()
+            with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN):
+                put = self.mock_blob_upload()
+                _, text = self.call_tool('upload_file', {
+                    'filename': 'a.txt',
+                    'content_base64': base64.b64encode(b'hi').decode()}, expect_error=True)
+            self.assertEqual(text, mcp.CAPACITY_MESSAGE)
+            put.assert_not_called()
+            self.post.assert_not_called()
+        self.assertEqual(self.budget_rows(), {})
+
+    def test_budget_db_failure_fails_closed_without_creating_a_share(self):
+        with patch.dict(app.config, MCP_DAILY_BYTES_PER_IP=1000), \
+                patch('mcp._byte_rows', side_effect=sqlite3.OperationalError('disk I/O error')):
+            _, text = self.call_tool('share_text', {'text': 'doomed'}, expect_error=True)
+        self.assertIn('Internal error', text)
+        self.assertNotIn('disk I/O error', text)
+        self.assertNotIn('OperationalError', text)
+        self.assertNotIn('Traceback', text)
+        self.post.assert_not_called()
+        with app.app_context():
+            count = get_db().execute('SELECT COUNT(*) FROM shares').fetchone()[0]
+        self.assertEqual(count, 0)
+
+    def test_daily_budget_resets_after_the_window(self):
+        with patch.dict(app.config, MCP_DAILY_BYTES_PER_IP=8, MCP_GLOBAL_DAILY_BYTES=8):
+            self.tool_json('share_text', {'text': 'x' * 8})
+            _, text = self.call_tool('share_text', {'text': 'y'}, expect_error=True)
+            self.assertEqual(text, mcp.CAPACITY_MESSAGE)
+            # The next day: stale budget rows are pruned and the budget starts over.
+            self.clock.return_value = self.now + 86_400
+            created = self.tool_json('share_text', {'text': 'z' * 8})
+            self.assertTrue(created['success'])
+        self.assertEqual(self.budget_rows(), {'127.0.0.1': 8, '*': 8})
 
     # ── secret hygiene ───────────────────────────────────────────────────────
 
