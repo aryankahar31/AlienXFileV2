@@ -81,11 +81,12 @@ The size warning suggests Litterbox when a file exceeds the normal limit; it doe
 | `ALIENX_MCP_ENABLED` | `0` | Set to `1` to serve `/mcp`; any other value returns 404 for GET and POST. |
 | `MCP_API_KEY` | empty | Optional shared secret. When set, every `/mcp` request needs `Authorization: Bearer <key>` and otherwise gets 401 with JSON-RPC `-32001`. Empty means anonymous mode with a startup warning. Keep it in dashboard secrets, never in source. |
 | `ALIENX_PUBLIC_BASE_URL` | `https://alienxfilev2.onrender.com` | Base used for returned `/share/<code>` and `/download/<code>` URLs. |
-| `MCP_MAX_UPLOAD_BYTES` | `26214400` (25 MiB) | Decoded size cap for `upload_file`, also bounding the JSON request body (413 beyond it). |
+| `MCP_MAX_UPLOAD_BYTES` | `26214400` (25 MiB) | Size cap for `upload_file`: decoded `content_base64` length and ChatGPT-provided file downloads (Content-Length pre-check plus a streamed cap), also bounding the JSON request body (413 beyond it). |
 | `MCP_RATE_LIMIT` | `60` | Requests per IP in the write bucket (`initialize`, `ping`, `tools/list`, `share_text`, `upload_file`). |
 | `MCP_LOOKUP_RATE_LIMIT` | `20` | Calls per IP in the read bucket (`get_shared_content`, `get_shared_file`, `check_share`). |
 | `MCP_RATE_WINDOW` | `600` | Window seconds for both MCP buckets; they are separate from the website's upload/lookup buckets. |
 | `MCP_ALLOWED_ORIGINS` | `https://chatgpt.com,https://chat.openai.com` | Browser `Origin` allowlist. Any other Origin gets 403; clients that send no Origin (curl, server-side SDKs) are unaffected. |
+| `MCP_FILE_HOST_SUFFIXES` | `oaiusercontent.com,openai.com` | Comma-separated host suffix allowlist for ChatGPT `file` downloads. Matching is exact or dot-boundary (`files.oaiusercontent.com` matches, `evil-oaiusercontent.com` does not). Only `https` on port 443 is fetched, credentials in the URL are refused, redirects are re-validated at most 3 times, private/reserved DNS results fail closed, and the signed URL is never logged or returned. |
 
 Beyond the gateway IP limits, `/mcp` shares the site-wide constraints: 1 GB absolute request cap, `MAX_TEXT_LENGTH`, banned executable extensions, custom-code validation, and provider fallback.
 
@@ -102,7 +103,7 @@ Beyond the gateway IP limits, `/mcp` shares the site-wide constraints: 1 GB abso
 
 | Tool | What it does |
 | --- | --- |
-| `upload_file` | Stores a base64-encoded file (≤ `MCP_MAX_UPLOAD_BYTES` decoded) through the normal `/upload` path and returns a code plus public URLs. Oversized files are rejected with instructions to upload on the website. |
+| `upload_file` | Stores a file and returns a code plus public URLs, from exactly one of: a ChatGPT attachment in the host-provided `file` object (declared via `_meta.openai/fileParams`), or `content_base64` bytes with `filename`. Oversized input is rejected with instructions to upload on the website. |
 | `share_text` | Stores text (≤ 100,000 characters) and returns a code plus public URLs. |
 | `get_shared_content` | Reads a share: full text for text shares; inline content for small text-like files up to 100 KB; metadata and a download link for large or binary files; a file listing for folders. |
 | `get_shared_file` | Metadata only (type, name, size, expiry, password flag) plus the public download URL; never file bytes. |
@@ -112,6 +113,7 @@ Shared rules for all tools:
 
 - **Expiry** accepts `1h`, `12h`, `24h`, `72h`, `168h`, friendly aliases (`1 hour`, `1d`, `1 day`, `tomorrow`, `3d`, `3 days`, `7d`, `1 week`), and spoken forms such as `12 hours`, `12hr`, or `3 day` — any `<number><unit>` with unit `h`/`hour(s)`/`hr(s)`, `d`/`day(s)`, or `w`/`week(s)` is accepted only when it equals exactly 1, 12, 24, 72, or 168 hours; default 24 hours. Anything else (`5 minutes`, `2 days`, `6 hours`) is rejected with the accepted list.
 - **No passwords through MCP.** Password-protected shares are created and opened only on the website. Reads of an encrypted share return metadata, `is_encrypted: true`, and instructions to open the share URL in a browser — never ciphertext, salt, or IV.
+- **ChatGPT attachments.** `upload_file` declares `file` through `_meta["openai/fileParams"]`; ChatGPT desktop web replaces it with a `download_url`/`file_id` object that the server fetches (SSRF rules and `MCP_FILE_HOST_SUFFIXES` above) and stores through the same `/upload` path. Unusable references — bare file IDs or mobile `chat_upload://` strings — fail with guidance to attach on desktop web or upload on the website. Re-uploading the same attachment creates a second, independent share. The signed download URL never appears in responses or logs.
 - Missing and expired codes are deliberately indistinguishable (`Share not found or expired.`), and no tool can delete, list, or enumerate shares.
 - Codes follow the same 3–20 alphanumeric validation as the website. Storage-provider URLs and database details are never returned; links are always the public `/share/` and `/download/` pages.
 

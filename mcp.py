@@ -20,7 +20,9 @@ import re
 import time
 from io import BytesIO
 from pathlib import Path
+from urllib.parse import urljoin, urlparse
 
+import requests
 from flask import Blueprint, current_app, jsonify, request
 from werkzeug.test import EnvironBuilder
 
@@ -41,6 +43,17 @@ DISCOVER_SUPPORTED_VERSIONS = (MODERN_PROTOCOL_VERSION, '2025-11-25', '2025-06-1
                                '2025-03-26', '2024-11-05')
 DEFAULT_PROTOCOL_VERSION = '2025-11-25'
 WEBSITE_URL = 'https://alienxfilev2.onrender.com'
+
+# ChatGPT file params (openai/fileParams): the host injects a temporary
+# provided-file object instead of file bytes. The signed download_url must
+# never appear in any response, error message, or log line.
+FILE_PARAM_HINT = ('Attach the file on ChatGPT desktop web and try again, or upload it on the '
+                   'website at ' + WEBSITE_URL + ' and share the code it returns.')
+FILE_PARAM_NO_URL = 'ChatGPT did not provide a downloadable file URL. ' + FILE_PARAM_HINT
+DEFAULT_FILE_HOST_SUFFIXES = 'oaiusercontent.com,openai.com'
+FILE_FETCH_TIMEOUT = (5, 15)
+FILE_FETCH_CHUNK_BYTES = 64 * 1024
+FILE_FETCH_MAX_HOPS = 3
 
 CODE_RE = re.compile(r'[A-Za-z0-9]{3,20}')
 BASE64_RE = re.compile(r'[A-Za-z0-9+/]*={0,2}')
@@ -369,30 +382,52 @@ def _tool_definitions():
         {
             'name': 'upload_file',
             'description': (
-                'Upload a small file (base64 content) and create a temporary AlienXFile share; '
-                'returns a short code plus public share/download URLs. Use when the user provides '
-                'a file to share. Do NOT use for files larger than '
-                f'{max_bytes} bytes decoded — tell the user to upload at {WEBSITE_URL} instead and '
+                'Upload a small file and create a temporary AlienXFile share; returns a short code '
+                'plus public share/download URLs. Provide "file" for a ChatGPT attachment (the host '
+                'passes download_url/file_id) or "content_base64" together with "filename" for raw '
+                'bytes — exactly one of the two. Do NOT use for files larger than '
+                f'{max_bytes} bytes — tell the user to upload at {WEBSITE_URL} instead and '
                 'give you the resulting code. Do NOT use for password-protected shares: MCP never '
                 'accepts passwords; use the website for that. Shares expire automatically.'
             ),
             'inputSchema': {
                 'type': 'object',
+                '$defs': {
+                    'OpenAIFile': {
+                        'type': 'object',
+                        'properties': {
+                            'download_url': {'type': 'string'},
+                            'file_id': {'type': 'string'},
+                            'mime_type': {'type': 'string'},
+                            'file_name': {'type': 'string'},
+                        },
+                        'required': ['download_url', 'file_id'],
+                        'additionalProperties': False,
+                    },
+                },
                 'properties': {
                     'filename': {'type': 'string', 'maxLength': MAX_FILENAME,
                                  'description': 'File name only, no directories '
-                                                '(path components are stripped, ".." is rejected).'},
+                                                '(path components are stripped, ".." is rejected). '
+                                                'Used with content_base64.'},
                     'content_base64': {'type': 'string',
                                        'description': f'File bytes as standard base64 (no "data:" '
                                                       f'prefix, no line breaks). Decoded size limit '
-                                                      f'{max_bytes} bytes.'},
+                                                      f'{max_bytes} bytes. Use together with '
+                                                      f'filename; do not combine with file.'},
+                    'file': {'$ref': '#/$defs/OpenAIFile',
+                             'description': 'ChatGPT file attachment injected by the host when the '
+                                            'user attaches a file (declared via openai/fileParams). '
+                                            'Do not fabricate this object; use content_base64 '
+                                            'instead for bytes you already have.'},
                     'expires_in': expiry_field,
                     'custom_code': custom_field,
                 },
-                'required': ['filename', 'content_base64'],
+                'required': [],
                 'additionalProperties': False,
             },
             'annotations': {'readOnlyHint': False, 'destructiveHint': False, 'openWorldHint': False},
+            '_meta': {'openai/fileParams': ['file']},
             'securitySchemes': schemes,
             'security': security,
         },
@@ -679,14 +714,148 @@ def _oversize_message(max_bytes):
             f'the website at {WEBSITE_URL} instead, then give me the share code it returns.')
 
 
+# ── ChatGPT file params (openai/fileParams) ──────────────────────────────────
+
+def _file_host_suffixes():
+    """Allowed download_url host suffixes (strict dot-boundary matching)."""
+    raw = os.environ.get('MCP_FILE_HOST_SUFFIXES', DEFAULT_FILE_HOST_SUFFIXES)
+    suffixes = []
+    for part in raw.split(','):
+        part = part.strip().lower()
+        if part.startswith('*.'):
+            part = part[2:]
+        part = part.lstrip('.')
+        if part:
+            suffixes.append(part)
+    return tuple(suffixes)
+
+
+def _parse_file_param(file_ref):
+    """Validate the host-injected file object; return (download_url, file_name).
+
+    Handles the known variants ChatGPT sends: the full object (desktop web),
+    a bare file_id string (Actions normalization), and chat_upload:// string
+    references (mobile). The URL is used only inside _fetch_chatgpt_file and
+    must never be echoed anywhere.
+    """
+    if isinstance(file_ref, str) or not isinstance(file_ref, dict):
+        # Bare file_id, chat_upload://..., ints, arrays, null-shaped refs.
+        raise ToolError(FILE_PARAM_NO_URL)
+    if 'download_url' not in file_ref or file_ref['download_url'] in (None, ''):
+        raise ToolError(FILE_PARAM_NO_URL)
+    download_url = file_ref['download_url']
+    if not isinstance(download_url, str):
+        raise ToolError(f'"download_url" must be a string. {FILE_PARAM_HINT}')
+    for key in ('file_id', 'mime_type', 'file_name'):
+        value = file_ref.get(key)
+        if value is not None and not isinstance(value, str):
+            raise ToolError(f'"{key}" must be a string. {FILE_PARAM_HINT}')
+    file_name = file_ref.get('file_name')
+    if isinstance(file_name, str) and not file_name.strip():
+        file_name = None
+    return download_url.strip(), file_name
+
+
+def _validate_file_url(download_url):
+    """Reject unsafe fetch targets: scheme, userinfo, port, host allowlist, IP."""
+    try:
+        parsed = urlparse(download_url)
+        port = parsed.port
+    except ValueError:
+        raise ToolError(f'The file download URL is not a valid URL. {FILE_PARAM_HINT}')
+    if parsed.scheme != 'https' or not parsed.hostname or port not in (None, 443):
+        raise ToolError(f'The file download URL must be an https URL on port 443. {FILE_PARAM_HINT}')
+    if '@' in parsed.netloc:
+        # Never embed credentials in the fetch URL (no auth headers either).
+        raise ToolError(f'The file download host is not allowed. {FILE_PARAM_HINT}')
+    hostname = parsed.hostname.lower()
+    suffixes = _file_host_suffixes()
+    if not any(hostname == suffix or hostname.endswith('.' + suffix) for suffix in suffixes):
+        raise ToolError(f'The file download host is not allowed. {FILE_PARAM_HINT}')
+    if flask_app._is_private_host(hostname):
+        # Fail-closed: private/reserved IPs and DNS failures are both rejected.
+        raise ToolError(f'The file download host is not allowed. {FILE_PARAM_HINT}')
+    return download_url
+
+
+def _fetch_chatgpt_file(file_ref, max_bytes):
+    """Stream a host-provided file param into memory. Returns (data, file_name).
+
+    Safety: https only, strict host allowlist, private/DNS fail-closed check,
+    allow_redirects=False with at most FILE_FETCH_MAX_HOPS manually validated
+    hops, Content-Length pre-check plus a streamed size cap, TLS verification
+    on, and no cookies or auth headers. The signed download_url never appears
+    in responses or logs (only the tool name and exception type are logged).
+    """
+    download_url, file_name = _parse_file_param(file_ref)
+    url = _validate_file_url(download_url)
+    data = bytearray()
+    for hop in range(FILE_FETCH_MAX_HOPS + 1):
+        try:
+            response = requests.get(url, timeout=FILE_FETCH_TIMEOUT, allow_redirects=False,
+                                    stream=True, verify=True,
+                                    headers={'User-Agent': 'AlienXFile-MCP/2.0',
+                                             'Accept': '*/*'})
+        except requests.Timeout:
+            logger.warning('MCP upload_file file fetch failed (Timeout)')
+            raise ToolError(f'Could not download the attached file (timed out). {FILE_PARAM_HINT}')
+        except requests.RequestException as exc:
+            logger.warning('MCP upload_file file fetch failed (%s)', type(exc).__name__)
+            raise ToolError(f'Could not download the attached file. {FILE_PARAM_HINT}')
+        with response:
+            if response.status_code in (301, 302, 303, 307, 308):
+                location = response.headers.get('Location')
+                if not location:
+                    raise ToolError(f'Could not download the attached file. {FILE_PARAM_HINT}')
+                if hop == FILE_FETCH_MAX_HOPS:
+                    raise ToolError(f'Could not download the attached file (too many redirects). '
+                                    f'{FILE_PARAM_HINT}')
+                url = _validate_file_url(urljoin(url, location))
+                continue
+            if response.status_code != 200:
+                raise ToolError(f'Could not download the attached file '
+                                f'(HTTP {response.status_code}). {FILE_PARAM_HINT}')
+            content_length = response.headers.get('Content-Length')
+            if content_length:
+                try:
+                    declared = int(content_length)
+                except ValueError:
+                    declared = None
+                if declared is not None and declared > max_bytes:
+                    raise ToolError(_oversize_message(max_bytes))
+            for chunk in response.iter_content(FILE_FETCH_CHUNK_BYTES):
+                if not chunk:
+                    continue
+                if len(data) + len(chunk) > max_bytes:
+                    raise ToolError(_oversize_message(max_bytes))
+                data.extend(chunk)
+            break
+    return bytes(data), file_name
+
+
 def _tool_upload_file(args):
-    raw_name = _require_string(args, 'filename')
-    content_b64 = _require_string(args, 'content_base64')
+    file_ref = args.get('file')
+    has_file = file_ref is not None
+    has_base64 = args.get('content_base64') is not None
+    if has_file and has_base64:
+        raise ToolError('Provide only one of "file" (a ChatGPT attachment) or "content_base64" '
+                        '(raw file bytes), not both.')
+    if not has_file and not has_base64:
+        raise ToolError('Provide one of "file" (a ChatGPT attachment) or "content_base64" '
+                        '(raw file bytes) with "filename".')
     expiry = _normalize_expiry(args.get('expires_in'))
     custom_code = _custom_code(args.get('custom_code'))
-    filename = _sanitize_filename(raw_name)
     max_bytes = current_app.config.get('MCP_MAX_UPLOAD_BYTES', DEFAULT_MCP_MAX_UPLOAD_BYTES)
-    data = _decode_base64(content_b64, max_bytes)
+    if has_file:
+        # Validate shape and name first so a blocked extension fails before any download.
+        _, file_name = _parse_file_param(file_ref)
+        filename = _sanitize_filename(file_name) if file_name is not None else 'attachment'
+        data, _ = _fetch_chatgpt_file(file_ref, max_bytes)
+    else:
+        raw_name = _require_string(args, 'filename')
+        content_b64 = _require_string(args, 'content_base64')
+        filename = _sanitize_filename(raw_name)
+        data = _decode_base64(content_b64, max_bytes)
     form = {'mode': 'file', 'storageProvider': 'vercel', 'expire': expiry,
             'file': (BytesIO(data), filename)}
     if custom_code:

@@ -1,5 +1,6 @@
 import base64
 import json
+import socket
 import sqlite3
 import tempfile
 import unittest
@@ -16,6 +17,28 @@ FILE_URL = 'https://litter.catbox.moe/abc123.txt'
 BLOB_TOKEN = 'vercel_blob_rw_teststore_fakecredential'
 BLOB_URL = 'https://teststore.private.blob.vercel-storage.com/shares/' + 'a' * 32 + '/report.pdf'
 WEBSITE = 'https://alienxfilev2.onrender.com'
+SIGNED_URL = ('https://files.oaiusercontent.com/file-abc123?se=2026-10-04T00%3A00%3A00Z'
+              '&sig=fake-signature%2Fmust-never-leak&sp=r&sv=2024-11-04&rs=b7H2')
+
+
+class FakeResponse:
+    """Minimal streaming response double for mcp's file fetch."""
+
+    def __init__(self, status_code=200, headers=None, chunks=()):
+        self.status_code = status_code
+        self.headers = dict(headers or {})
+        self._chunks = [bytes(chunk) for chunk in chunks]
+        self.iter_called = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def iter_content(self, chunk_size=None):
+        self.iter_called = True
+        return iter(self._chunks)
 
 
 class McpTest(unittest.TestCase):
@@ -88,6 +111,23 @@ class McpTest(unittest.TestCase):
         self.addCleanup(put.stop)
         mocked.return_value.__enter__.return_value.status_code = 200
         mocked.return_value.__enter__.return_value.json.return_value = {'url': BLOB_URL}
+        return mocked
+
+    def mock_file_get(self, return_value=None, side_effect=None):
+        get = patch('mcp.requests.get')
+        mocked = get.start()
+        self.addCleanup(get.stop)
+        mocked.return_value = return_value
+        mocked.side_effect = side_effect
+        return mocked
+
+    def mock_public_dns(self):
+        # Offline-friendly stand-in: allowlisted hosts resolve to a public IP.
+        patched = patch('flask_app.socket.getaddrinfo',
+                        return_value=[(socket.AF_INET, socket.SOCK_STREAM,
+                                       socket.IPPROTO_TCP, '', ('23.22.3.10', 443))])
+        mocked = patched.start()
+        self.addCleanup(patched.stop)
         return mocked
 
     def create_share(self, **kwargs):
@@ -212,8 +252,7 @@ class McpTest(unittest.TestCase):
                          ['upload_file', 'share_text', 'get_shared_content',
                           'get_shared_file', 'check_share'])
         by_name = {tool['name']: tool for tool in tools}
-        self.assertEqual(by_name['upload_file']['inputSchema']['required'],
-                         ['filename', 'content_base64'])
+        self.assertEqual(by_name['upload_file']['inputSchema']['required'], [])
         self.assertEqual(by_name['share_text']['inputSchema']['required'], ['text'])
         self.assertTrue(by_name['get_shared_content']['annotations']['readOnlyHint'])
         self.assertTrue(by_name['get_shared_file']['annotations']['readOnlyHint'])
@@ -240,6 +279,32 @@ class McpTest(unittest.TestCase):
             self.assertEqual(upload['securitySchemes']['bearerAuth']['scheme'], 'bearer')
             self.assertEqual(upload['security'], [{'bearerAuth': []}])
             self.assertNotIn('none', json.dumps(upload['securitySchemes']))
+
+    def test_upload_file_schema_declares_openai_file_param(self):
+        _, payload = self.rpc('tools/list')
+        tools = payload['result']['tools']
+        self.assertEqual(len(tools), 5)
+        upload = next(tool for tool in tools if tool['name'] == 'upload_file')
+        self.assertEqual(upload['_meta'], {'openai/fileParams': ['file']})
+        schema = upload['inputSchema']
+        self.assertEqual(schema['required'], [])
+        self.assertIn('file', schema['properties'])
+        self.assertEqual(schema['properties']['file']['$ref'], '#/$defs/OpenAIFile')
+        definition = schema['$defs']['OpenAIFile']
+        self.assertEqual(definition['type'], 'object')
+        self.assertEqual(sorted(definition['properties']),
+                         ['download_url', 'file_id', 'file_name', 'mime_type'])
+        for key in ('download_url', 'file_id', 'mime_type', 'file_name'):
+            with self.subTest(key=key):
+                self.assertEqual(definition['properties'][key]['type'], 'string')
+        self.assertEqual(definition['required'], ['download_url', 'file_id'])
+        self.assertFalse(definition['additionalProperties'])
+        # No other tool grows a file param declaration.
+        for tool in tools:
+            with self.subTest(tool=tool['name']):
+                if tool['name'] != 'upload_file':
+                    self.assertNotIn('_meta', tool)
+                    self.assertNotIn('$defs', tool['inputSchema'])
 
     # ── share_text tool ──────────────────────────────────────────────────────
 
@@ -377,8 +442,9 @@ class McpTest(unittest.TestCase):
         with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN):
             put = self.mock_blob_upload()
             cases = [
-                ({}, 'Missing required argument "filename"'),
-                ({'filename': 'a.txt'}, 'Missing required argument "content_base64"'),
+                ({}, 'Provide one of "file"'),
+                ({'filename': 'a.txt'}, 'Provide one of "file"'),
+                ({'content_base64': 'AAAA'}, 'Missing required argument "filename"'),
                 ({'filename': 7, 'content_base64': 'AAAA'}, 'must be a string'),
                 ({'filename': 'a.txt', 'content_base64': 5}, 'must be a string'),
                 ({'filename': '', 'content_base64': 'AAAA'}, 'filename must be a non-empty'),
@@ -421,6 +487,311 @@ class McpTest(unittest.TestCase):
             })
         self.assertEqual(created['filename'], 'entry.txt')
         self.assertEqual(created['code'], '00000')
+
+    # ── upload_file: ChatGPT file params (openai/fileParams) ─────────────────
+
+    def _file_ref(self, **extra):
+        ref = {'download_url': SIGNED_URL, 'file_id': 'file-abc123'}
+        ref.update(extra)
+        return ref
+
+    def test_upload_file_fetches_host_file_param_and_creates_share(self):
+        payload = b'file param bytes'
+        with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN):
+            put = self.mock_blob_upload()
+            self.mock_public_dns()
+            get = self.mock_file_get(return_value=FakeResponse(
+                200, {'Content-Length': str(len(payload))}, [payload]))
+            created = self.tool_json('upload_file', {
+                'file': self._file_ref(mime_type='text/plain',
+                                       file_name='notes/report.txt'),
+                'expires_in': '7d',
+                'custom_code': 'fileparam',
+            })
+            # Fetch shape: bare GET, no redirects followed, TLS on, no cookies/auth.
+            self.assertEqual(get.call_args.args[0], SIGNED_URL)
+            kwargs = get.call_args.kwargs
+            self.assertEqual(kwargs['timeout'], (5, 15))
+            self.assertTrue(kwargs['stream'])
+            self.assertTrue(kwargs['verify'])
+            self.assertFalse(kwargs['allow_redirects'])
+            self.assertNotIn('cookies', kwargs)
+            self.assertNotIn('auth', kwargs)
+            self.assertNotIn('Authorization', kwargs['headers'])
+            self.assertEqual(get.call_count, 1)
+            # Share result: sanitized name, right size/expiry, no signed URL anywhere.
+            self.assertEqual(created['code'], 'fileparam')
+            self.assertEqual(created['filename'], 'report.txt')
+            self.assertEqual(created['size'], len(payload))
+            self.assertEqual(datetime.fromisoformat(created['expires_at']).timestamp(),
+                             self.now + 604800)
+            meta = self.tool_json('get_shared_file', {'code': 'fileparam'})
+            self.assertEqual(meta['type'], 'file')
+            self.assertEqual(meta['filename'], 'report.txt')
+            self.assertEqual(meta['size'], len(payload))
+            self.assertEqual(meta['download_url'], WEBSITE + '/download/fileparam')
+            combined = json.dumps(created) + json.dumps(meta)
+            self.assertNotIn(SIGNED_URL, combined)
+            self.assertNotIn('oaiusercontent', combined)
+            self.assertNotIn('sig=', combined)
+            self.assertNotIn(BLOB_URL, combined)
+            self.assertEqual(put.call_count, 1)
+
+    def test_upload_file_file_param_and_base64_are_mutually_exclusive(self):
+        get = self.mock_file_get(side_effect=AssertionError('fetch must not run'))
+        both = {'filename': 'a.txt',
+                'content_base64': base64.b64encode(b'x').decode(),
+                'file': self._file_ref()}
+        _, text = self.call_tool('upload_file', both, expect_error=True)
+        self.assertIn('only one of "file"', text)
+        # Neither source: both bare shapes get the same guidance (a filename alone
+        # is neither a file param nor base64 bytes).
+        for arguments, needle in (({}, 'Provide one of "file"'),
+                                  ({'filename': 'a.txt'}, 'Provide one of "file"'),
+                                  ({'content_base64': 'AAAA'},
+                                   'Missing required argument "filename"')):
+            with self.subTest(arguments=sorted(arguments)):
+                _, text = self.call_tool('upload_file', arguments, expect_error=True)
+                self.assertIn(needle, text)
+                self.assertNotIn('Traceback', text)
+        self.assertEqual(get.call_count, 0)
+
+    def test_upload_file_file_param_rejects_unusable_host_payloads(self):
+        # Bare file_id, chat_upload:// (mobile), and malformed shapes: clear errors,
+        # no fetch, and never a hint of the signed URL.
+        get = self.mock_file_get(side_effect=AssertionError('fetch must not run'))
+        cases = [
+            ('file-abc123', 'did not provide a downloadable file URL'),
+            ('chat_upload://image_0', 'did not provide a downloadable file URL'),
+            (5, 'did not provide a downloadable file URL'),
+            ({}, 'did not provide a downloadable file URL'),
+            ({'download_url': None, 'file_id': 'f'}, 'did not provide a downloadable'),
+            ({'download_url': '', 'file_id': 'f'}, 'did not provide a downloadable'),
+            ({'download_url': 123, 'file_id': 'f'}, '"download_url" must be a string'),
+            ({'download_url': ['https://x'], 'file_id': 'f'}, '"download_url" must be a string'),
+            (self._file_ref(file_name=5), '"file_name" must be a string'),
+            (self._file_ref(mime_type=7), '"mime_type" must be a string'),
+            (self._file_ref(file_id=[]), '"file_id" must be a string'),
+        ]
+        for index, (ref, needle) in enumerate(cases):
+            with self.subTest(needle=needle, index=index):
+                _, text = self.call_tool('upload_file', {'file': ref},
+                                         request_id=index + 1, expect_error=True)
+                self.assertIn(needle, text)
+                self.assertNotIn('Traceback', text)
+                self.assertNotIn('oaiusercontent', text)
+                self.assertNotIn('sig=', text)
+        # Bad expiry with a file param fails before any download starts.
+        _, text = self.call_tool('upload_file',
+                                 {'file': self._file_ref(), 'expires_in': '9 weeks'},
+                                 request_id=99, expect_error=True)
+        self.assertIn('expires_in', text)
+        self.assertEqual(get.call_count, 0)
+
+    def test_upload_file_file_param_rejects_unsafe_urls_before_fetch(self):
+        # Scheme, userinfo, port, allowlist boundary, and obvious private targets
+        # must all be rejected before requests.get is ever called (no DNS either,
+        # except where the allowlist itself would trigger it — none of these do).
+        get = self.mock_file_get(side_effect=AssertionError('fetch must not run'))
+        cases = [
+            ('http://files.oaiusercontent.com/f', 'must be an https URL'),
+            ('ftp://files.oaiusercontent.com/f', 'must be an https URL'),
+            ('file:///etc/passwd', 'must be an https URL'),
+            ('not-a-url', 'must be an https URL'),
+            ('https://127.0.0.1/f', 'not allowed'),
+            ('https://localhost/f', 'not allowed'),
+            ('https://169.254.169.254/latest/meta-data', 'not allowed'),
+            ('https://10.0.0.8/f', 'not allowed'),
+            ('https://[::1]/f', 'not allowed'),
+            ('https://evil-oaiusercontent.com/f', 'not allowed'),
+            ('https://oaiusercontent.com.evil.com/f', 'not allowed'),
+            ('https://files.oaiusercontent.com.evil.com/f', 'not allowed'),
+            ('https://notoaiusercontent.com/f', 'not allowed'),
+            ('https://files.oaiusercontent.com@evil.com/f', 'not allowed'),
+            ('https://user:pass@files.oaiusercontent.com/f', 'not allowed'),
+            ('https://files.oaiusercontent.com:8443/f', 'must be an https URL'),
+        ]
+        for index, (url, needle) in enumerate(cases):
+            with self.subTest(url=url):
+                _, text = self.call_tool('upload_file',
+                                         {'file': {'download_url': url, 'file_id': 'f'}},
+                                         request_id=index + 1, expect_error=True)
+                self.assertIn(needle, text)
+                self.assertNotIn('Traceback', text)
+                self.assertNotIn('user:pass', text)
+                self.assertNotIn('@evil.com', text)
+        self.assertEqual(get.call_count, 0)
+
+    def test_upload_file_file_param_dns_failures_fail_closed(self):
+        get = self.mock_file_get(side_effect=AssertionError('fetch must not run'))
+        # DNS failure on an allowlisted host: rejected, no fetch.
+        with patch('flask_app.socket.getaddrinfo',
+                   side_effect=socket.gaierror(-2, 'Name or service not known')):
+            _, text = self.call_tool('upload_file', {'file': self._file_ref()},
+                                     expect_error=True)
+        self.assertIn('not allowed', text)
+        # Resolution to a link-local address (DNS rebinding): rejected, no fetch.
+        with patch('flask_app.socket.getaddrinfo',
+                   return_value=[(socket.AF_INET, socket.SOCK_STREAM,
+                                  socket.IPPROTO_TCP, '', ('169.254.169.254', 443))]):
+            _, text = self.call_tool('upload_file', {'file': self._file_ref()},
+                                     request_id=2, expect_error=True)
+        self.assertIn('not allowed', text)
+        self.assertEqual(get.call_count, 0)
+
+    def test_upload_file_file_param_redirects_and_http_failures(self):
+        payload = b'redirected bytes'
+        with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN):
+            self.mock_blob_upload()
+            self.mock_public_dns()
+            get = self.mock_file_get()
+            scenarios = [
+                (FakeResponse(302, {'Location': 'https://169.254.169.254/meta'}),
+                 'not allowed', 1),
+                (FakeResponse(302, {'Location': 'https://evil.com/steal'}),
+                 'not allowed', 1),
+                (FakeResponse(302, {'Location': 'http://files.oaiusercontent.com/f'}),
+                 'must be an https URL', 1),
+                (FakeResponse(302, {'Location': 'https://files.oaiusercontent.com:8443/f'}),
+                 'must be an https URL', 1),
+                (FakeResponse(302, {}), 'Could not download the attached file', 1),
+                (FakeResponse(403, {}), 'HTTP 403', 1),
+                (FakeResponse(404, {}), 'HTTP 404', 1),
+            ]
+            for index, (response, needle, calls) in enumerate(scenarios):
+                with self.subTest(needle=needle):
+                    get.reset_mock()
+                    get.side_effect = None
+                    get.return_value = response
+                    _, text = self.call_tool('upload_file', {'file': self._file_ref()},
+                                             request_id=index + 1, expect_error=True)
+                    self.assertIn(needle, text)
+                    self.assertEqual(get.call_count, calls)
+                    self.assertNotIn('evil.com', text)
+                    self.assertNotIn('169.254', text)
+            # Valid same-host redirect chain is followed (302 -> 200 -> share).
+            get.reset_mock()
+            get.side_effect = [
+                FakeResponse(302, {'Location': SIGNED_URL + '&hop=1'}),
+                FakeResponse(200, {'Content-Length': str(len(payload))}, [payload]),
+            ]
+            created = self.tool_json('upload_file', {'file': self._file_ref()},
+                                     request_id=50)
+            self.assertEqual(created['size'], len(payload))
+            self.assertEqual(get.call_count, 2)
+            self.assertNotIn(SIGNED_URL, json.dumps(created))
+            # Too many redirects: bounded manual loop, generic error.
+            get.reset_mock()
+            get.side_effect = None
+            get.return_value = FakeResponse(302, {'Location': SIGNED_URL})
+            _, text = self.call_tool('upload_file', {'file': self._file_ref()},
+                                     request_id=51, expect_error=True)
+            self.assertIn('too many redirects', text)
+            self.assertEqual(get.call_count, 4)
+            self.assertNotIn('oaiusercontent', text)
+
+    def test_upload_file_file_param_enforces_size_limit(self):
+        with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN):
+            put = self.mock_blob_upload()
+            self.mock_public_dns()
+            get = self.mock_file_get()
+            # Declared Content-Length over the cap: rejected without reading the body.
+            with patch.dict(app.config, MCP_MAX_UPLOAD_BYTES=100):
+                oversize = FakeResponse(200, {'Content-Length': '9999'}, chunks=[b'x'])
+                get.return_value = oversize
+                _, text = self.call_tool('upload_file', {'file': self._file_ref()},
+                                         expect_error=True)
+                self.assertIn('too large', text)
+                self.assertIn(WEBSITE, text)
+                self.assertFalse(oversize.iter_called)
+            # Mid-body overflow: stream stops as soon as the cap is passed.
+            get.reset_mock()
+            with patch.dict(app.config, MCP_MAX_UPLOAD_BYTES=10):
+                stream = FakeResponse(200, {'Content-Length': '10'},
+                                      chunks=[b'x' * 8, b'x' * 8])
+                get.return_value = stream
+                _, text = self.call_tool('upload_file', {'file': self._file_ref()},
+                                         request_id=2, expect_error=True)
+                self.assertIn('too large', text)
+                self.assertTrue(stream.iter_called)
+            put.assert_not_called()
+            # A body exactly at the cap still uploads.
+            get.reset_mock()
+            exact = FakeResponse(200, {'Content-Length': '10'}, chunks=[b'x' * 10])
+            get.return_value = exact
+            with patch.dict(app.config, MCP_MAX_UPLOAD_BYTES=10):
+                created = self.tool_json('upload_file',
+                                         {'file': self._file_ref()},
+                                         request_id=3)
+            self.assertEqual(created['size'], 10)
+            self.assertEqual(put.call_count, 1)
+            self.assertEqual(get.call_count, 1)
+
+    def test_upload_file_file_param_network_errors_are_generic(self):
+        get = self.mock_file_get(side_effect=requests.Timeout('connect timeout'))
+        with self.assertLogs('mcp', level='WARNING') as logs:
+            _, text = self.call_tool('upload_file', {'file': self._file_ref()},
+                                     expect_error=True)
+        self.assertIn('timed out', text)
+        self.assertNotIn('oaiusercontent', text)
+        self.assertNotIn('connect timeout', text)
+        self.assertNotIn('sig=', text)
+        self.assertTrue(any('Timeout' in line for line in logs.output))
+        self.assertTrue(all('oaiusercontent' not in line for line in logs.output))
+        # Connection failures: generic response, exception type only in the log.
+        get.side_effect = requests.ConnectionError('proxy refused connection')
+        get.reset_mock()
+        with self.assertLogs('mcp', level='WARNING') as logs2:
+            _, text = self.call_tool('upload_file', {'file': self._file_ref()},
+                                     request_id=2, expect_error=True)
+        self.assertIn('Could not download the attached file', text)
+        self.assertNotIn('proxy refused', text)
+        self.assertNotIn('oaiusercontent', text)
+        self.assertNotIn('Traceback', text)
+        self.assertTrue(any('ConnectionError' in line for line in logs2.output))
+        self.assertTrue(all('oaiusercontent' not in line for line in logs2.output))
+        self.assertEqual(get.call_count, 1)
+
+    def test_upload_file_file_param_sanitizes_and_blocks_filenames(self):
+        get = self.mock_file_get(side_effect=AssertionError('fetch must not run'))
+        cases = [
+            ('evil.exe', '".exe" extension are blocked'),
+            ('evil.bat', '".bat" extension are blocked'),
+            ('../etc/passwd', 'path traversal'),
+            ('..', 'path traversal'),
+        ]
+        for index, (name, needle) in enumerate(cases):
+            with self.subTest(name=name):
+                _, text = self.call_tool('upload_file',
+                                         {'file': self._file_ref(file_name=name)},
+                                         request_id=index + 1, expect_error=True)
+                self.assertIn(needle, text)
+                self.assertNotIn('Traceback', text)
+        self.assertEqual(get.call_count, 0)
+        # Directory components are stripped on the success path too.
+        get.side_effect = None
+        with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN):
+            self.mock_blob_upload()
+            self.mock_public_dns()
+            get.return_value = FakeResponse(200, {'Content-Length': '2'}, [b'hi'])
+            created = self.tool_json('upload_file',
+                                     {'file': self._file_ref(file_name='notes/diary/entry.txt')},
+                                     request_id=50)
+        self.assertEqual(created['filename'], 'entry.txt')
+        self.assertEqual(created['size'], 2)
+        # A missing/blank file_name falls back to a generic name.
+        get.reset_mock()
+        with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN):
+            self.mock_blob_upload()
+            self.mock_public_dns()
+            get.return_value = FakeResponse(200, {'Content-Length': '2'}, [b'hi'])
+            created = self.tool_json('upload_file',
+                                     {'file': {'download_url': SIGNED_URL,
+                                               'file_id': 'file-abc123',
+                                               'file_name': '   '}},
+                                     request_id=51)
+        self.assertEqual(created['filename'], 'attachment')
+        self.assertNotIn(SIGNED_URL, json.dumps(created))
 
     def test_duplicate_custom_code_is_a_clear_tool_error(self):
         created = self.tool_json('share_text', {'text': 'first', 'custom_code': 'dupcode'})
