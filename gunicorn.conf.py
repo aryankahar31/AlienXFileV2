@@ -2,7 +2,8 @@ import os
 
 bind = f'0.0.0.0:{os.environ.get("PORT", "8000")}'
 workers = 1
-threads = 2
+# 4 threads: MCP upload_file can hold threads during storage uploads; keep website responsive.
+threads = 4
 timeout = 240
 
 # Trust forwarded scheme only on Render's public ingress; do not use this for private-network callers.
