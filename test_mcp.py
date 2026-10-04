@@ -223,6 +223,28 @@ class McpTest(unittest.TestCase):
                                          expect_error=True)
                 self.assertIn('expires_in', text)
 
+    def test_expiry_spoken_forms_are_normalised(self):
+        cases = [('12 hours', 43200, '12h'), ('12 hour', 43200, '12h'),
+                 ('12hr', 43200, '12h'), ('1 hours', 3600, '1h'),
+                 ('3 day', 259200, '72h'), ('72 hours', 259200, '72h'),
+                 ('1 week', 604800, '168h'), ('  12 HOURS ', 43200, '12h')]
+        for index, (value, seconds, canonical) in enumerate(cases):
+            with self.subTest(expires_in=value):
+                created = self.tool_json('share_text',
+                                         {'text': f'spoken form {value!r}',
+                                          'expires_in': value})
+                self.assertEqual(created['expires_in'], canonical)
+                self.assertEqual(datetime.fromisoformat(created['expires_at']).timestamp(),
+                                 self.now + seconds)
+                self.assertEqual(created['code'], f'{index:05d}')
+        for bad in ('2 days', '6 hours', '5 minutes'):
+            with self.subTest(invalid=bad):
+                _, text = self.call_tool('share_text',
+                                         {'text': 'x', 'expires_in': bad},
+                                         expect_error=True)
+                self.assertIn('expires_in', text)
+                self.assertIn('Allowed expires_in values', text)
+
     def test_share_text_validation_errors(self):
         cases = [
             ({}, 'Missing required argument "text"'),

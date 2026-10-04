@@ -55,8 +55,17 @@ EXPIRY_ALIASES = {
     '168h': '168h', '7d': '168h', '1 week': '168h',
 }
 DEFAULT_EXPIRY = '24h'
+# "<N><unit>" / "<N> <unit>" durations normalised to hours. Only the five
+# lifetimes above are ever produced — anything else is rejected.
+EXPIRY_DURATION_RE = re.compile(r'^(\d+)\s*(hours?|hrs?|h|days?|d|weeks?|w)$')
+EXPIRY_UNIT_HOURS = {'h': 1, 'hour': 1, 'hours': 1, 'hr': 1, 'hrs': 1,
+                     'd': 24, 'day': 24, 'days': 24,
+                     'w': 168, 'week': 168, 'weeks': 168}
+EXPIRY_HOURS_TO_KEY = {1: '1h', 12: '12h', 24: '24h', 72: '72h', 168: '168h'}
 EXPIRY_HELP = ('Allowed expires_in values: 1h, 12h, 24h, 72h, 168h (aliases: '
-               '"1 hour", "1d", "1 day", "tomorrow", "3d", "3 days", "7d", "1 week"). '
+               '"1 hour", "1d", "1 day", "tomorrow", "3d", "3 days", "7d", "1 week"; '
+               'spoken forms such as "12 hours", "12hr" or "3 day" are accepted only '
+               'when they equal 1, 12, 24, 72 or 168 hours). '
                'The default is 24h.')
 
 if os.environ.get('ALIENX_MCP_ENABLED', '0') == '1' and not os.environ.get('MCP_API_KEY', '').strip():
@@ -289,7 +298,9 @@ def _tool_definitions():
     expiry_field = {'type': 'string',
                     'description': 'Share lifetime: 1h, 12h, 24h (default), 72h or 168h. '
                                    'Friendly aliases such as "1 hour", "1d", "tomorrow", "3d" '
-                                   'and "1 week" are accepted.'}
+                                   'and "1 week" are accepted, as are spoken forms like '
+                                   '"12 hours", "12hr" or "3 day" that equal one of those '
+                                   'five lifetimes.'}
     custom_field = {'type': 'string', 'pattern': '^[A-Za-z0-9]{3,20}$',
                     'description': 'Optional custom share code: 3-20 letters or numbers.'}
     tools = [
@@ -447,7 +458,13 @@ def _normalize_expiry(value):
         return DEFAULT_EXPIRY
     if not isinstance(value, str):
         raise ToolError(f'Invalid expires_in. {EXPIRY_HELP}')
-    canonical = EXPIRY_ALIASES.get(value.strip().lower())
+    text = value.strip().lower()
+    canonical = EXPIRY_ALIASES.get(text)
+    if canonical is None:
+        match = EXPIRY_DURATION_RE.match(text)
+        if match:
+            hours = int(match.group(1)) * EXPIRY_UNIT_HOURS[match.group(2)]
+            canonical = EXPIRY_HOURS_TO_KEY.get(hours)
     if canonical is None or canonical not in flask_app.expire_seconds:
         raise ToolError(f'Invalid expires_in: {value!r}. {EXPIRY_HELP}')
     return canonical

@@ -107,7 +107,7 @@ Beyond the gateway IP limits, `/mcp` shares the site-wide constraints: 1 GB abso
 
 Shared rules for all tools:
 
-- **Expiry** accepts `1h`, `12h`, `24h`, `72h`, `168h` and friendly aliases (`1 hour`, `1d`, `1 day`, `tomorrow`, `3d`, `3 days`, `7d`, `1 week`); default 24 hours. Unknown values are rejected with the accepted list.
+- **Expiry** accepts `1h`, `12h`, `24h`, `72h`, `168h`, friendly aliases (`1 hour`, `1d`, `1 day`, `tomorrow`, `3d`, `3 days`, `7d`, `1 week`), and spoken forms such as `12 hours`, `12hr`, or `3 day` — any `<number><unit>` with unit `h`/`hour(s)`/`hr(s)`, `d`/`day(s)`, or `w`/`week(s)` is accepted only when it equals exactly 1, 12, 24, 72, or 168 hours; default 24 hours. Anything else (`5 minutes`, `2 days`, `6 hours`) is rejected with the accepted list.
 - **No passwords through MCP.** Password-protected shares are created and opened only on the website. Reads of an encrypted share return metadata, `is_encrypted: true`, and instructions to open the share URL in a browser — never ciphertext, salt, or IV.
 - Missing and expired codes are deliberately indistinguishable (`Share not found or expired.`), and no tool can delete, list, or enumerate shares.
 - Codes follow the same 3–20 alphanumeric validation as the website. Storage-provider URLs and database details are never returned; links are always the public `/share/` and `/download/` pages.
