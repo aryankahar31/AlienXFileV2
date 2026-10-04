@@ -1,5 +1,6 @@
 import base64
 import json
+import os
 import socket
 import sqlite3
 import tempfile
@@ -12,6 +13,7 @@ from unittest.mock import patch
 import requests
 
 from flask_app import app, get_db, save_share
+import mcp
 
 FILE_URL = 'https://litter.catbox.moe/abc123.txt'
 BLOB_TOKEN = 'vercel_blob_rw_teststore_fakecredential'
@@ -637,6 +639,108 @@ class McpTest(unittest.TestCase):
             _, text = self.call_tool('upload_file', {'file': self._file_ref()},
                                      request_id=2, expect_error=True)
         self.assertIn('not allowed', text)
+        self.assertEqual(get.call_count, 0)
+
+    def test_file_host_rejection_logs_hostname_only(self):
+        get = self.mock_file_get(side_effect=AssertionError('fetch must not run'))
+        url = ('https://files.oaiusercontent.com.evil.com/secret-path'
+               '?sig=LEAKME&x=1#frag')
+        with self.assertLogs('mcp', level='WARNING') as logs:
+            _, text = self.call_tool('upload_file',
+                                     {'file': {'download_url': url, 'file_id': 'f'}},
+                                     expect_error=True)
+        self.assertEqual(len(logs.output), 1)
+        line = logs.output[0]
+        # One line: the reason code plus the bare, sanitized hostname.
+        self.assertIn('(host_not_allowed)', line)
+        self.assertIn('files.oaiusercontent.com.evil.com', line)
+        for leak in ('https://', '/secret-path', 'sig=', 'LEAKME', 'x=1', '#frag'):
+            self.assertNotIn(leak, line)
+        # The tool response stays generic as before.
+        self.assertIn('not allowed', text)
+        self.assertNotIn('files.oaiusercontent', text)
+        self.assertNotIn('sig=', text)
+        self.assertNotIn('Traceback', text)
+        self.assertEqual(get.call_count, 0)
+
+    def test_lookalike_hosts_are_rejected_and_logged_hostname_only(self):
+        get = self.mock_file_get(side_effect=AssertionError('fetch must not run'))
+        lookalikes = [
+            'https://evil-oaiusercontent.com/x?sig=LEAK',
+            'https://oaiusercontent.com.evil.com/x?sig=LEAK',
+            'https://notoaiusercontent.com/x?sig=LEAK',
+            'https://files.oaiusercontent.com.cdn.example/x?sig=LEAK',
+        ]
+        for index, url in enumerate(lookalikes):
+            expected_host = url.split('/')[2]
+            with self.subTest(url=url):
+                with self.assertLogs('mcp', level='WARNING') as logs:
+                    _, text = self.call_tool('upload_file',
+                                             {'file': {'download_url': url,
+                                                       'file_id': 'f'}},
+                                             request_id=index + 1,
+                                             expect_error=True)
+                self.assertEqual(len(logs.output), 1)
+                line = logs.output[0]
+                self.assertIn('(host_not_allowed)', line)
+                self.assertIn(expected_host, line)
+                for leak in ('https://', '/x', 'sig=', 'LEAK'):
+                    self.assertNotIn(leak, line)
+                self.assertIn('not allowed', text)
+                self.assertNotIn(expected_host, text)
+        self.assertEqual(get.call_count, 0)
+
+    def test_file_redirect_host_rejection_logs_hostname_only(self):
+        get = self.mock_file_get(return_value=FakeResponse(
+            302, {'Location': 'https://cdn.malicious.example/collect?token=LEAKME'}))
+        self.mock_public_dns()
+        with self.assertLogs('mcp', level='WARNING') as logs:
+            _, text = self.call_tool('upload_file', {'file': self._file_ref()},
+                                     expect_error=True)
+        self.assertEqual(len(logs.output), 1)
+        line = logs.output[0]
+        self.assertIn('(redirect_host_not_allowed)', line)
+        self.assertNotIn('(host_not_allowed)', line)
+        self.assertIn('cdn.malicious.example', line)
+        for leak in ('https://', '/collect', 'token=', 'LEAKME'):
+            self.assertNotIn(leak, line)
+        self.assertIn('not allowed', text)
+        self.assertNotIn('malicious', text)
+        self.assertEqual(get.call_count, 1)
+
+    def test_file_host_suffix_env_override_comma_list_and_dot_boundary(self):
+        get = self.mock_file_get(side_effect=AssertionError('fetch must not run'))
+        public_dns = [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, '',
+                       ('23.22.3.10', 443))]
+        with patch.dict(os.environ):
+            os.environ.pop('MCP_FILE_HOST_SUFFIXES', None)
+            # Defaults stay exactly as documented when the override is absent.
+            self.assertEqual(mcp.DEFAULT_FILE_HOST_SUFFIXES,
+                             'oaiusercontent.com,openai.com')
+            self.assertEqual(mcp._file_host_suffixes(),
+                             ('oaiusercontent.com', 'openai.com'))
+            # The override is a comma-separated list; spaces are tolerated.
+            os.environ['MCP_FILE_HOST_SUFFIXES'] = 'mycdn.example, assets.internal.test'
+            self.assertEqual(mcp._file_host_suffixes(),
+                             ('mycdn.example', 'assets.internal.test'))
+            with patch('flask_app.socket.getaddrinfo', return_value=public_dns):
+                for allowed in ('https://files.mycdn.example/f.txt?sig=x',
+                                'https://a.assets.internal.test/f.txt'):
+                    with self.subTest(allowed=allowed):
+                        self.assertEqual(mcp._validate_file_url(allowed), allowed)
+                # Strict dot-boundary: suffix lookalikes never match.
+                for rejected in ('https://evilmycdn.example/f',
+                                 'https://cdn.example/f',
+                                 'https://mycdn.example.evil.com/f',
+                                 'https://a.assets.internal.test.attacker.io/f'):
+                    with self.subTest(rejected=rejected):
+                        with self.assertLogs('mcp', level='WARNING') as logs:
+                            with self.assertRaises(mcp.ToolError):
+                                mcp._validate_file_url(rejected)
+                        self.assertEqual(len(logs.output), 1)
+                        self.assertIn('(host_not_allowed)', logs.output[0])
+                        self.assertNotIn('https://', logs.output[0])
+                        self.assertNotIn('/f', logs.output[0])
         self.assertEqual(get.call_count, 0)
 
     def test_upload_file_file_param_redirects_and_http_failures(self):

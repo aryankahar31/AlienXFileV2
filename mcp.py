@@ -756,8 +756,24 @@ def _parse_file_param(file_ref):
     return download_url.strip(), file_name
 
 
-def _validate_file_url(download_url):
-    """Reject unsafe fetch targets: scheme, userinfo, port, host allowlist, IP."""
+def _safe_host_label(hostname):
+    """Reduce a hostname to [a-z0-9.-] (max 100 chars) for a single log line.
+
+    Never receives scheme, path, query, fragment, userinfo, or port: callers
+    pass urlparse().hostname only, and the result is the sole URL-derived
+    value that may appear in logs.
+    """
+    return re.sub(r'[^a-z0-9.-]', '', (hostname or '').lower())[:100]
+
+
+def _validate_file_url(download_url, *, redirect=False):
+    """Reject unsafe fetch targets: scheme, userinfo, port, host allowlist, IP.
+
+    An allowlist rejection logs exactly one warning containing only the
+    sanitized hostname and the reason code (`host_not_allowed` for the initial
+    URL, `redirect_host_not_allowed` for a redirect hop) — never the full URL,
+    query string, or any other component. All other rejections log nothing.
+    """
     try:
         parsed = urlparse(download_url)
         port = parsed.port
@@ -771,6 +787,9 @@ def _validate_file_url(download_url):
     hostname = parsed.hostname.lower()
     suffixes = _file_host_suffixes()
     if not any(hostname == suffix or hostname.endswith('.' + suffix) for suffix in suffixes):
+        reason = 'redirect_host_not_allowed' if redirect else 'host_not_allowed'
+        logger.warning('MCP upload_file file host rejected (%s): %s',
+                       reason, _safe_host_label(hostname))
         raise ToolError(f'The file download host is not allowed. {FILE_PARAM_HINT}')
     if flask_app._is_private_host(hostname):
         # Fail-closed: private/reserved IPs and DNS failures are both rejected.
@@ -785,7 +804,8 @@ def _fetch_chatgpt_file(file_ref, max_bytes):
     allow_redirects=False with at most FILE_FETCH_MAX_HOPS manually validated
     hops, Content-Length pre-check plus a streamed size cap, TLS verification
     on, and no cookies or auth headers. The signed download_url never appears
-    in responses or logs (only the tool name and exception type are logged).
+    in responses or logs; allowlist rejections log one warning with only the
+    sanitized hostname and reason code.
     """
     download_url, file_name = _parse_file_param(file_ref)
     url = _validate_file_url(download_url)
@@ -810,7 +830,7 @@ def _fetch_chatgpt_file(file_ref, max_bytes):
                 if hop == FILE_FETCH_MAX_HOPS:
                     raise ToolError(f'Could not download the attached file (too many redirects). '
                                     f'{FILE_PARAM_HINT}')
-                url = _validate_file_url(urljoin(url, location))
+                url = _validate_file_url(urljoin(url, location), redirect=True)
                 continue
             if response.status_code != 200:
                 raise ToolError(f'Could not download the attached file '
