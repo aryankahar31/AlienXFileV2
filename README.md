@@ -91,9 +91,12 @@ Beyond the gateway IP limits, `/mcp` shares the site-wide constraints: 1 GB abso
 
 ### Protocol behavior
 
-- Methods: `initialize` (returns `capabilities.tools`, `serverInfo`, and usage instructions), `notifications/initialized` (202 with an empty body), `ping`, `tools/list`, `tools/call`.
+- Methods: `initialize` (returns `capabilities.tools`, `serverInfo`, and usage instructions), `server/discover` (advertises supported protocol versions for MCP 2026-07-28 clients), `notifications/initialized` (202 with an empty body), `ping`, `tools/list`, `tools/call`.
+- Protocol versions: `initialize` echoes any requested legacy revision from `2024-11-05`, `2025-03-26`, `2025-06-18`, or `2025-11-25`, and otherwise answers the latest supported one (`2025-11-25`); `server/discover` also lists `2026-07-28`, which this stateless endpoint serves without a session.
+- CORS: `OPTIONS /mcp` returns a preflight (204) with `Access-Control-Allow-Origin` echoed only for the allowlisted origins in `MCP_ALLOWED_ORIGINS` (`https://chatgpt.com`, `https://chat.openai.com`), allowing `Content-Type`, `Authorization`, `Accept`, `MCP-Protocol-Version`, and `Mcp-Session-Id` request headers and exposing `Mcp-Session-Id`. Other origins get 403 with no CORS headers, on both preflight and real requests. `GET /mcp` returns 405 with `Allow: POST`, and `/mcp` and `/mcp/` are both served directly without a redirect.
 - JSON-RPC errors: unknown method `-32601` with HTTP 200, parse error `-32700` with 400, invalid request `-32600` with 400 (415 for a non-JSON content type, 413 for an oversized body, 405 for GET), invalid params `-32602`, rate limit `-32005` with 429 and `Retry-After`.
 - Tool-level failures (unknown code, bad argument, storage unavailable) are returned as `isError: true` results with a safe message, never as protocol errors and never with stack traces. Request bodies are never logged because they carry user content.
+- Tool security metadata follows the OpenAPI-style scheme objects from the MCP spec: with `MCP_API_KEY` set every tool declares a `bearerAuth` HTTP bearer scheme; in anonymous mode no `securitySchemes`/`security` fields are emitted at all (there is no valid "none" scheme type).
 
 ### Tools
 

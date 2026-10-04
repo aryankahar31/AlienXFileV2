@@ -30,8 +30,16 @@ mcp_bp = Blueprint('mcp', __name__)
 
 SERVER_NAME = 'AlienXFile'
 SERVER_VERSION = '2.0.0'
-PROTOCOL_VERSIONS = ('2024-11-05', '2025-03-26', '2025-06-18')
-DEFAULT_PROTOCOL_VERSION = '2025-06-18'
+# Legacy handshake versions we answer in initialize, plus the modern
+# (stateless) revision advertised through server/discover — this server is
+# stateless, so it can serve both eras.
+PROTOCOL_VERSIONS = ('2024-11-05', '2025-03-26', '2025-06-18', '2025-11-25')
+MODERN_PROTOCOL_VERSION = '2026-07-28'
+# Newest first: what server/discover advertises (modern revision + every
+# legacy handshake revision this endpoint answers).
+DISCOVER_SUPPORTED_VERSIONS = (MODERN_PROTOCOL_VERSION, '2025-11-25', '2025-06-18',
+                               '2025-03-26', '2024-11-05')
+DEFAULT_PROTOCOL_VERSION = '2025-11-25'
 WEBSITE_URL = 'https://alienxfilev2.onrender.com'
 
 CODE_RE = re.compile(r'[A-Za-z0-9]{3,20}')
@@ -174,7 +182,12 @@ def _allowed_origins():
 
 # ── HTTP endpoints ───────────────────────────────────────────────────────────
 
-@mcp_bp.route('/mcp', methods=['GET'])
+CORS_ALLOW_HEADERS = ('Content-Type, Authorization, Accept, MCP-Protocol-Version, '
+                      'Mcp-Session-Id')
+
+
+@mcp_bp.route('/mcp', methods=['GET'], strict_slashes=False,
+               provide_automatic_options=False)
 def mcp_get():
     if not current_app.config.get('MCP_ENABLED'):
         return jsonify(error='Not found.'), 404
@@ -182,7 +195,36 @@ def mcp_get():
                          status=405, headers={'Allow': 'POST'})
 
 
-@mcp_bp.route('/mcp', methods=['POST'])
+@mcp_bp.route('/mcp', methods=['OPTIONS'], strict_slashes=False)
+def mcp_options():
+    """CORS preflight for browser-based MCP clients (allowlist only)."""
+    if not current_app.config.get('MCP_ENABLED'):
+        return jsonify(error='Not found.'), 404
+    origin = request.headers.get('Origin', '')
+    if origin and origin not in _allowed_origins():
+        return mcp_rpc_error(-32600, 'Origin is not allowed.', status=403)
+    return '', 204, {'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+                     'Access-Control-Allow-Headers': CORS_ALLOW_HEADERS,
+                     'Access-Control-Max-Age': '600'}
+
+
+@mcp_bp.after_request
+def _mcp_cors_headers(response):
+    """Echo Allow-Origin for allowlisted origins on every /mcp response."""
+    origin = request.headers.get('Origin', '')
+    if origin and origin in _allowed_origins():
+        response.headers['Access-Control-Allow-Origin'] = origin
+        response.headers['Access-Control-Expose-Headers'] = 'Mcp-Session-Id'
+        vary = response.headers.get('Vary', '')
+        parts = [part.strip() for part in vary.split(',') if part.strip()]
+        if 'Origin' not in parts:
+            parts.append('Origin')
+        response.headers['Vary'] = ', '.join(parts)
+    return response
+
+
+@mcp_bp.route('/mcp', methods=['POST'], strict_slashes=False,
+               provide_automatic_options=False)
 def mcp_endpoint():
     if not current_app.config.get('MCP_ENABLED'):
         return jsonify(error='Not found.'), 404
@@ -215,6 +257,8 @@ def mcp_endpoint():
         return '', 202
     if method == 'initialize':
         return _handle_initialize(payload, request_id)
+    if method == 'server/discover':
+        return _handle_discover(request_id)
     if method == 'ping':
         return _rpc_result(request_id, {})
     if method == 'tools/list':
@@ -222,6 +266,19 @@ def mcp_endpoint():
     if method == 'tools/call':
         return _handle_tools_call(payload, request_id)
     return mcp_rpc_error(-32601, f'Method not found: {method}.', request_id, 200)
+
+
+def _instructions():
+    max_bytes = current_app.config.get('MCP_MAX_UPLOAD_BYTES', DEFAULT_MCP_MAX_UPLOAD_BYTES)
+    return (
+        'AlienXFile shares temporary content. Tools: upload_file and share_text create shares; '
+        'get_shared_content reads text/file content; get_shared_file returns metadata plus a '
+        f'download link; check_share validates a code. Files are limited to {max_bytes} bytes '
+        'decoded through MCP — larger files must be uploaded on the website at ' + WEBSITE_URL +
+        ' and the resulting code shared instead. Passwords are not supported through MCP: '
+        'password-protected shares can only be created and opened on the website. Shares expire '
+        'automatically (default 24h).'
+    )
 
 
 def _handle_initialize(payload, request_id):
@@ -236,21 +293,23 @@ def _handle_initialize(payload, request_id):
         return mcp_rpc_error(-32602, 'Invalid params: protocolVersion must be a string.',
                              request_id, 200)
     protocol = requested if requested in PROTOCOL_VERSIONS else DEFAULT_PROTOCOL_VERSION
-    max_bytes = current_app.config.get('MCP_MAX_UPLOAD_BYTES', DEFAULT_MCP_MAX_UPLOAD_BYTES)
-    instructions = (
-        'AlienXFile shares temporary content. Tools: upload_file and share_text create shares; '
-        'get_shared_content reads text/file content; get_shared_file returns metadata plus a '
-        f'download link; check_share validates a code. Files are limited to {max_bytes} bytes '
-        'decoded through MCP — larger files must be uploaded on the website at ' + WEBSITE_URL +
-        ' and the resulting code shared instead. Passwords are not supported through MCP: '
-        'password-protected shares can only be created and opened on the website. Shares expire '
-        'automatically (default 24h).'
-    )
     return _rpc_result(request_id, {
         'protocolVersion': protocol,
         'capabilities': {'tools': {}},
-        'serverInfo': {'name': SERVER_NAME, 'version': SERVER_VERSION},
-        'instructions': instructions,
+        'serverInfo': {'name': SERVER_NAME, 'title': SERVER_NAME, 'version': SERVER_VERSION},
+        'instructions': _instructions(),
+    })
+
+
+def _handle_discover(request_id):
+    """server/discover (MCP 2026-07-28): servers MUST implement this RPC."""
+    return _rpc_result(request_id, {
+        'resultType': 'complete',
+        'supportedVersions': list(DISCOVER_SUPPORTED_VERSIONS),
+        'capabilities': {'tools': {}},
+        '_meta': {'io.modelcontextprotocol/serverInfo': {'name': SERVER_NAME,
+                                                         'version': SERVER_VERSION}},
+        'instructions': _instructions(),
     })
 
 
@@ -283,13 +342,16 @@ def _handle_tools_call(payload, request_id):
 # ── Tool catalogue ───────────────────────────────────────────────────────────
 
 def _security_fields():
+    """Tool security metadata (OpenAPI-style security scheme objects).
+
+    Anonymous mode declares no scheme at all: "none" is not a valid OpenAPI
+    security-scheme type, and clients treat a tool without security as public.
+    """
     if (current_app.config.get('MCP_API_KEY') or '').strip():
         return ({'bearerAuth': {'type': 'http', 'scheme': 'bearer',
                                 'description': 'Send Authorization: Bearer <MCP_API_KEY>.'}},
                 [{'bearerAuth': []}])
-    return ({'noauth': {'type': 'none',
-                        'description': 'No authentication required (anonymous dev mode).'}},
-            [{}])
+    return {}, []
 
 
 def _tool_definitions():
@@ -420,6 +482,12 @@ def _tool_definitions():
             'security': security,
         },
     ]
+    if not schemes:
+        # Anonymous mode: omit security metadata entirely rather than emit a
+        # non-standard scheme type that strict clients may reject.
+        for tool in tools:
+            tool.pop('securitySchemes', None)
+            tool.pop('security', None)
     return tools
 
 

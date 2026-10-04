@@ -107,17 +107,21 @@ class McpTest(unittest.TestCase):
         result = payload['result']
         self.assertEqual(result['protocolVersion'], '2025-06-18')
         self.assertEqual(result['capabilities'], {'tools': {}})
-        self.assertEqual(result['serverInfo'], {'name': 'AlienXFile', 'version': '2.0.0'})
+        self.assertEqual(result['serverInfo'],
+                         {'name': 'AlienXFile', 'title': 'AlienXFile', 'version': '2.0.0'})
         instructions = result['instructions']
         self.assertIn(WEBSITE, instructions)
         self.assertIn('password', instructions.lower())
         self.assertIn('expire', instructions.lower())
-        # Unsupported protocol versions fall back to the current default.
+        # Modern ChatGPT clients ask for 2025-11-25: it must be echoed back.
+        _, payload = self.rpc('initialize', {'protocolVersion': '2025-11-25'}, request_id=5)
+        self.assertEqual(payload['result']['protocolVersion'], '2025-11-25')
+        # Unsupported protocol versions fall back to the latest supported legacy one.
         _, payload = self.rpc('initialize', {'protocolVersion': '1999-01-01'}, request_id=2)
-        self.assertEqual(payload['result']['protocolVersion'], '2025-06-18')
+        self.assertEqual(payload['result']['protocolVersion'], '2025-11-25')
         # Omitting params entirely is still a valid initialize.
         _, payload = self.rpc('initialize', request_id=3)
-        self.assertEqual(payload['result']['protocolVersion'], '2025-06-18')
+        self.assertEqual(payload['result']['protocolVersion'], '2025-11-25')
         # Non-object params are a protocol error, not a crash.
         response, payload = self.rpc('initialize', ['not-an-object'], request_id=4)
         self.assertEqual(response.status_code, 200)
@@ -137,6 +141,70 @@ class McpTest(unittest.TestCase):
                                             'message': 'Method not found: resources/list.'})
         self.assertEqual(payload['id'], 9)
 
+    def test_server_discover_is_implemented_for_modern_clients(self):
+        # ChatGPT's client (openai-mcp) calls server/discover with a string id
+        # before/alongside initialize; MCP 2026-07-28 requires servers to
+        # implement it, and a -32601 there makes modern clients fail.
+        response, payload = self.rpc('server/discover', request_id='openai-mcp-discover')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload['id'], 'openai-mcp-discover')
+        result = payload['result']
+        self.assertEqual(result['resultType'], 'complete')
+        self.assertEqual(result['supportedVersions'],
+                         ['2026-07-28', '2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'])
+        self.assertEqual(result['capabilities'], {'tools': {}})
+        self.assertEqual(result['_meta']['io.modelcontextprotocol/serverInfo'],
+                         {'name': 'AlienXFile', 'version': '2.0.0'})
+        self.assertIn('AlienXFile', result['instructions'])
+        # Every legacy initialize version must also be advertised here.
+        for version in ('2024-11-05', '2025-03-26', '2025-06-18', '2025-11-25'):
+            self.assertIn(version, result['supportedVersions'])
+
+    def test_cors_preflight_and_headers_for_allowlisted_origins(self):
+        preflight = self.client.options('/mcp',
+                                        headers={'Origin': 'https://chatgpt.com',
+                                                 'Access-Control-Request-Method': 'POST',
+                                                 'Access-Control-Request-Headers':
+                                                     'content-type, mcp-protocol-version, '
+                                                     'authorization'})
+        self.assertEqual(preflight.status_code, 204)
+        self.assertEqual(preflight.headers['Access-Control-Allow-Origin'], 'https://chatgpt.com')
+        allow_headers = preflight.headers['Access-Control-Allow-Headers'].lower()
+        for header in ('content-type', 'authorization', 'mcp-protocol-version', 'mcp-session-id'):
+            self.assertIn(header, allow_headers)
+        self.assertIn('POST', preflight.headers['Access-Control-Allow-Methods'])
+        # Allowed origin on a real POST gains the same CORS headers.
+        response = self.client.post('/mcp',
+                                    json={'jsonrpc': '2.0', 'id': 1, 'method': 'ping'},
+                                    headers={'Origin': 'https://chat.openai.com'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers['Access-Control-Allow-Origin'],
+                         'https://chat.openai.com')
+        self.assertIn('Origin', response.headers['Vary'])
+        # Disallowed origins: preflight and POST are both rejected, no CORS.
+        for origin in ('https://evil.example', 'https://openai.com.evil.example'):
+            with self.subTest(origin=origin):
+                preflight = self.client.options('/mcp', headers={'Origin': origin})
+                self.assertEqual(preflight.status_code, 403)
+                self.assertNotIn('Access-Control-Allow-Origin', preflight.headers)
+                post = self.client.post('/mcp',
+                                        json={'jsonrpc': '2.0', 'id': 1, 'method': 'ping'},
+                                        headers={'Origin': origin})
+                self.assertEqual(post.status_code, 403)
+                self.assertNotIn('Access-Control-Allow-Origin', post.headers)
+        # No Origin (curl, server-side SDKs): plain 204 without CORS echo.
+        anonymous = self.client.options('/mcp')
+        self.assertEqual(anonymous.status_code, 204)
+        self.assertNotIn('Access-Control-Allow-Origin', anonymous.headers)
+
+    def test_mcp_trailing_slash_serves_without_redirect(self):
+        for path in ('/mcp', '/mcp/'):
+            with self.subTest(path=path):
+                response = self.client.post(path, json={'jsonrpc': '2.0', 'id': 1,
+                                                        'method': 'ping'})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.get_json()['result'], {})
+
     def test_tools_list_catalog_and_annotations(self):
         _, payload = self.rpc('tools/list')
         tools = payload['result']['tools']
@@ -155,21 +223,23 @@ class McpTest(unittest.TestCase):
         for tool in tools:
             with self.subTest(tool=tool['name']):
                 self.assertEqual(tool['inputSchema']['additionalProperties'], False)
-                self.assertIn('securitySchemes', tool)
-                self.assertIn('security', tool)
+                # Anonymous mode must not advertise a non-standard scheme type.
+                self.assertNotIn('securitySchemes', tool)
+                self.assertNotIn('security', tool)
                 self.assertFalse(tool['annotations']['destructiveHint'])
                 self.assertFalse(tool['annotations']['openWorldHint'])
         self.assertEqual(by_name['check_share']['inputSchema']['properties']['code']['pattern'],
                          '^[A-Za-z0-9]{3,20}$')
-        self.assertIn('noauth', by_name['upload_file']['securitySchemes'])
-        # The published security scheme flips when an API key is configured.
+        # The published security scheme appears only when an API key is configured.
         with patch.dict(app.config, MCP_API_KEY='sekret-key-value'):
             _, payload = self.rpc('tools/list', request_id=2,
                                   headers={'Authorization': 'Bearer sekret-key-value'})
             upload = next(tool for tool in payload['result']['tools']
                           if tool['name'] == 'upload_file')
-            self.assertIn('bearerAuth', upload['securitySchemes'])
+            self.assertEqual(upload['securitySchemes']['bearerAuth']['type'], 'http')
+            self.assertEqual(upload['securitySchemes']['bearerAuth']['scheme'], 'bearer')
             self.assertEqual(upload['security'], [{'bearerAuth': []}])
+            self.assertNotIn('none', json.dumps(upload['securitySchemes']))
 
     # ── share_text tool ──────────────────────────────────────────────────────
 
@@ -501,6 +571,8 @@ class McpTest(unittest.TestCase):
             self.assertEqual(response.status_code, 404)
             self.assertEqual(response.get_json(), {'error': 'Not found.'})
             response = self.client.get('/mcp')
+            self.assertEqual(response.status_code, 404)
+            response = self.client.options('/mcp')
             self.assertEqual(response.status_code, 404)
 
     # ── HTTP-level rules ─────────────────────────────────────────────────────
