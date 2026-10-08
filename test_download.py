@@ -2,6 +2,7 @@ import os
 import json
 import re
 import runpy
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -23,7 +24,7 @@ import requests
 from flask import render_template, request
 from requests_toolbelt.multipart.encoder import MultipartEncoder
 
-from flask_app import app, get_db, save_share
+from flask_app import app, get_db, save_share, _preview_category
 
 
 FILE_URL = 'https://litter.catbox.moe/abc123.txt'
@@ -1035,6 +1036,150 @@ with patch('flask_app.time.time', return_value=float(sys.argv[2])), patch(
             self.assertIn('image/png', response.content_type)
         response = self.client.get('/api/preview/abc123')
         self.assertEqual(response.status_code, 404)
+
+
+    def insert_share(self, key, name, provider='vercel', url=None, expires=None,
+                     salt=None, iv=None, is_encrypted=0):
+        url = url or (BLOB_URL if provider == 'vercel' else FILE_URL)
+        with app.app_context():
+            db = get_db()
+            with db:
+                db.execute('''INSERT INTO shares (key, type, name, content, url, size, expires,
+                                                  provider, salt, iv, is_encrypted)
+                              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                           (key, 'file', name, None, url, 9, expires or (self.now + 3600),
+                            provider, salt, iv, is_encrypted))
+
+    def test_encrypted_file_preview_is_rejected_before_any_storage_read(self):
+        self.insert_share('80001', 'secret.txt', provider='litterbox',
+                          salt='c2FsdA==', iv='aXY=', is_encrypted=1)
+        with patch('flask_app.requests.get') as mock_get:
+            response = self.client.get('/api/preview/80001')
+            mock_get.assert_not_called()
+        self.assertEqual(response.status_code, 400)
+        html = response.get_data(as_text=True)
+        self.assertIn('Encrypted shares preview after unlocking.', html)
+        self.assertNotIn(FILE_URL, html)
+        self.assertNotIn('c2FsdA==', html)
+        page = self.client.get('/share/80001')
+        self.assertEqual(page.status_code, 200)
+        page_html = page.get_data(as_text=True)
+        self.assertIn('password-prompt', page_html)
+        self.assertNotIn('id="previewContainer"', page_html)
+
+    def test_preview_litterbox_fetch_sends_curl_user_agent(self):
+        self.mock_provider(link='https://litter.catbox.moe/abc123py', status=200)
+        response = self.client.post('/upload', data={
+            'mode': 'file', 'storageProvider': 'litterbox',
+            'file': (BytesIO(b'print("hello")'), 'test.py'), 'expire': '1h',
+        })
+        self.assertEqual(response.status_code, 200, response.get_json())
+        key = response.get_json()['uploads'][0]['key']
+        file_resp = requests.Response()
+        file_resp.status_code = 200
+        file_resp._content = b'print("hello")'
+        file_resp._content_consumed = True
+        file_resp.headers['Content-Type'] = 'text/plain'
+        with patch('flask_app.requests.get') as mock_get:
+            mock_get.return_value = file_resp
+            response = self.client.get(f'/api/preview/{key}')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()['content'], 'print("hello")')
+        self.assertEqual(mock_get.call_args.args[0], 'https://litter.catbox.moe/abc123py')
+        self.assertEqual(mock_get.call_args.kwargs['headers']['User-Agent'], 'curl/8.5.0')
+
+    def test_preview_category_is_shared_by_server_and_download_page(self):
+        template = Path(__file__).with_name('templates') / 'download.html'
+        source = template.read_text(encoding='utf-8')
+        self.assertIn('preview_category(share.name)', source)
+        self.assertNotIn("previewCat = 'image' if ext in", source)
+        names = ['photo.png', 'clip.mp4', 'song.mp3', 'doc.pdf', 'notes.txt',
+                 'site.env', '.env', 'repo.gitignore', '.gitignore',
+                 'image.dockerfile', 'dockerfile', 'Dockerfile',
+                 'rules.makefile', 'makefile', 'Makefile',
+                 'archive.zip', 'setup.exe', 'no-extension']
+        for index, name in enumerate(names):
+            key = f'90{index:03d}'
+            self.insert_share(key, name)
+            page = self.client.get(f'/share/{key}')
+            self.assertEqual(page.status_code, 200, name)
+            with self.subTest(name=name):
+                html = page.get_data(as_text=True)
+                self.assertEqual('id="previewContainer"' in html,
+                                 _preview_category(name) is not None)
+                self.assertEqual(_preview_category(name),
+                                 _preview_category(name.upper()))
+
+    def test_encrypted_decrypt_flow_builds_text_nodes_instead_of_html(self):
+        template = Path(__file__).with_name('templates') / 'download.html'
+        source = template.read_text(encoding='utf-8')
+        section = source[source.index('Feature 6'):source.index('Feature 11')]
+        self.assertNotIn('innerHTML', section)
+        self.assertIn('heading.textContent = filename;', section)
+        self.assertIn('doneHeading.textContent = filename;', section)
+        self.assertIn('pre.textContent = text;', section)
+        self.assertIn('link.download = filename;', section)
+        self.insert_share('80002', '<img src=x onerror=alert(1)>.txt', provider='litterbox',
+                          salt='c2FsdA==', iv='aXY=', is_encrypted=1)
+        page = self.client.get('/share/80002')
+        self.assertEqual(page.status_code, 200)
+        html = page.get_data(as_text=True)
+        self.assertIn('data-filename="&lt;img src=x onerror=alert(1)&gt;.txt"', html)
+        self.assertNotIn('<img src=x onerror=alert(1)>', html)
+        self.assertNotIn('id="previewContainer"', html)
+
+    @unittest.skipUnless(shutil.which('node'), 'node is required to execute renderMarkdown')
+    def test_markdown_links_only_anchor_allowlisted_schemes(self):
+        template = Path(__file__).with_name('templates') / 'download.html'
+        source = template.read_text(encoding='utf-8')
+        start = source.index('function renderMarkdown')
+        end = source.index('// Code file preview loader')
+        section = source[start:end]
+        self.assertIn('rel="noopener noreferrer"', section)
+        self.assertNotIn("'<a href=\"$2\"", section)
+        payloads = [
+            '[click](javascript:alert(1))',
+            '[click](JAVASCRIPT:alert(1))',
+            '[click](data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==)',
+            '[click](vbscript:msgbox(1))',
+            '[click](java\tscript:alert(1))',
+            '[click](\tjavascript:alert(1))',
+            '[click](https://example.com/page?a=1&b=2)',
+            '[click](mailto:someone@example.com)',
+            '[click](/relative/path)',
+            '[click](#section)',
+            '<script>alert(1)</script> [ok](https://example.com)',
+        ]
+        blocked = payloads[:6]
+        node_script = (
+            "const fs = require('fs');\n"
+            "const html = fs.readFileSync(process.argv[1], 'utf8');\n"
+            "const start = html.indexOf('function renderMarkdown');\n"
+            "const end = html.indexOf('// Code file preview loader');\n"
+            "const inputs = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));\n"
+            "if (start < 0 || end <= start) process.exit(2);\n"
+            "eval(html.slice(start, end));\n"
+            "process.stdout.write(JSON.stringify(inputs.map(renderMarkdown)));\n"
+        )
+        with tempfile.TemporaryDirectory(prefix='alienx-node-') as directory:
+            inputs = Path(directory) / 'inputs.json'
+            inputs.write_text(json.dumps(payloads), encoding='utf-8')
+            result = subprocess.run(['node', '-e', node_script, str(template), str(inputs)],
+                                    capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        outputs = json.loads(result.stdout)
+        self.assertEqual(len(outputs), len(payloads))
+        for payload, output in zip(blocked, outputs[:len(blocked)]):
+            with self.subTest(payload=payload):
+                self.assertNotIn('<a ', output)
+        self.assertIn('<a href="https://example.com/page?a=1&amp;b=2" target="_blank" '
+                      'rel="noopener noreferrer">click</a>', outputs[6])
+        self.assertIn('<a href="mailto:someone@example.com"', outputs[7])
+        self.assertIn('<a href="/relative/path"', outputs[8])
+        self.assertIn('<a href="#section"', outputs[9])
+        self.assertNotIn('<script>', outputs[10])
+        self.assertIn('&lt;script&gt;', outputs[10])
+        self.assertIn('<a href="https://example.com"', outputs[10])
 
 
 if __name__ == '__main__':

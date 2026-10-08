@@ -85,6 +85,8 @@ if os.environ.get('RENDER') == 'true' and not app.config['DATABASE_URL']:
 expire_seconds = {'1h': 3600, '12h': 43200, '24h': 86400, '72h': 259200, '168h': 604800}
 banned_exts = {'.exe', '.scr', '.cpl', '.jar', '.bat', '.cmd', '.com', '.pif', '.vbs', '.wsf'}
 BLOB_API = 'https://vercel.com/api/blob'
+# BunkerWeb rejects the default python-requests agent on Litterbox requests.
+LITTERBOX_REQUEST_UA = 'curl/8.5.0'
 SCHEMA = '''
     CREATE TABLE IF NOT EXISTS shares (
         key TEXT PRIMARY KEY, type TEXT NOT NULL, name TEXT NOT NULL,
@@ -167,6 +169,7 @@ def template_settings():
                 upload_limit_label='1 GB' if limit >= 1_000_000_000 else f'{limit / 1_000_000:g} MB',
                 max_text_length=app.config['MAX_TEXT_LENGTH'], banned_exts=sorted(banned_exts),
                 storage_provider='Vercel Blob and Litterbox',
+                preview_category=_preview_category,
                 support_email=app.config['SUPPORT_EMAIL'])
 
 
@@ -750,9 +753,20 @@ PREVIEW_EXTENSIONS = {
               '.astro', '.tf', '.dockerfile', '.makefile', '.gitignore', '.env'},
 }
 
+# Exact lower-case file names that preview as code without a suffix.
+PREVIEW_FILENAMES = {'dockerfile', 'makefile'}
+
 
 def _preview_category(filename):
-    ext = Path(filename).suffix.lower()
+    name = Path(filename or '').name.lower()
+    if not name:
+        return None
+    if name in PREVIEW_FILENAMES:
+        return 'code'
+    ext = Path(name).suffix
+    if not ext and name.startswith('.') and len(name) > 1:
+        # Path('.env').suffix is empty, but dotfiles are listed as suffixes.
+        ext = name
     for category, exts in PREVIEW_EXTENSIONS.items():
         if ext in exts:
             return category
@@ -770,6 +784,8 @@ def preview_file(key):
     if row['expires'] <= time.time():
         cleanup_expired(db)
         return error_response('Expired.', 410)
+    if 'is_encrypted' in row.keys() and row['is_encrypted']:
+        return error_response('Encrypted shares preview after unlocking.', 400)
     category = _preview_category(row['name'] or '')
     if not category:
         return error_response('No preview available for this file type.', 400)
@@ -778,7 +794,8 @@ def preview_file(key):
         if not re.fullmatch(r'https://litter\.catbox\.moe/[A-Za-z0-9][A-Za-z0-9._-]*', url or ''):
             return error_response('Invalid storage link.', 502)
         try:
-            upstream = requests.get(url, stream=True, timeout=(10, 60), allow_redirects=False)
+            upstream = requests.get(url, headers={'User-Agent': LITTERBOX_REQUEST_UA},
+                                    stream=True, timeout=(10, 60), allow_redirects=False)
             if upstream.status_code != 200:
                 upstream.close()
                 return error_response('Storage unavailable.', 502)

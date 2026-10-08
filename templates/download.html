@@ -317,13 +317,7 @@
                     <p class="privacy">Third-party storage. Availability may end before expiry.</p>
                 {% endif %}
 
-                {% set ext = share.name.split('.')[-1]|lower if share.name and '.' in share.name else '' %}
-                {% set previewCat = 'image' if ext in ['png','jpg','jpeg','gif','webp','svg','bmp','ico','avif']
-                    else 'video' if ext in ['mp4','webm','ogv','mov','mkv']
-                    else 'audio' if ext in ['mp3','wav','ogg','flac','aac','m4a','wma']
-                    else 'pdf' if ext == 'pdf'
-                    else 'code' if ext in ['txt','md','py','js','ts','jsx','tsx','html','css','json','xml','yaml','yml','toml','sh','bash','c','cpp','h','hpp','java','rb','go','rs','sql','csv','log','ini','cfg','conf','php','r','swift','kt','scala','lua','pl','dart','vue','svelte','astro','tf']
-                    else '' %}
+                {% set previewCat = preview_category(share.name) or '' %}
 
                 {% if previewCat == 'image' %}
                 <div class="preview-container" id="previewContainer">
@@ -520,27 +514,40 @@
                     const decrypted = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: ivBuf }, key, encrypted);
                     const text = new TextDecoder().decode(decrypted);
                     const container = document.getElementById('decryptedContent');
-                    container.innerHTML = '<h2>' + document.querySelector('.box h1')?.textContent + '</h2>' +
-                        '<pre id="textContent" tabindex="0">' + text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</pre>' +
-                        '<button class="button" id="copyText" type="button" data-copy-target="textContent">Copy All Text</button>';
+                    container.replaceChildren();
+                    const heading = document.createElement('h2');
+                    heading.textContent = document.querySelector('.box h1')?.textContent || '';
+                    const pre = document.createElement('pre');
+                    pre.id = 'textContent';
+                    pre.tabIndex = 0;
+                    pre.textContent = text;
+                    const copyBtn = document.createElement('button');
+                    copyBtn.className = 'button';
+                    copyBtn.id = 'copyText';
+                    copyBtn.type = 'button';
+                    copyBtn.dataset.copyTarget = 'textContent';
+                    copyBtn.textContent = 'Copy All Text';
+                    container.append(heading, pre, copyBtn);
                     container.hidden = false;
                     document.getElementById('passwordPrompt').hidden = true;
-                    const copyBtn = document.getElementById('copyText');
-                    if (copyBtn) {
-                        copyBtn.addEventListener('click', async () => {
-                            try {
-                                await navigator.clipboard.writeText(text);
-                                copyBtn.textContent = 'Copied!';
-                            } catch {
-                                copyBtn.textContent = 'Copy failed — select and copy manually.';
-                            }
-                        });
-                    }
+                    copyBtn.addEventListener('click', async () => {
+                        try {
+                            await navigator.clipboard.writeText(text);
+                            copyBtn.textContent = 'Copied!';
+                        } catch {
+                            copyBtn.textContent = 'Copy failed — select and copy manually.';
+                        }
+                    });
                 } else if (type === 'file') {
                     const filename = data.dataset.filename;
                     const downloadUrl = '{{ url_for("download_direct", key=share.key) }}';
                     const container = document.getElementById('decryptedContent');
-                    container.innerHTML = '<h2>' + filename + '</h2><p>Downloading and decrypting file\u2026</p>';
+                    container.replaceChildren();
+                    const heading = document.createElement('h2');
+                    heading.textContent = filename;
+                    const note = document.createElement('p');
+                    note.textContent = 'Downloading and decrypting file…';
+                    container.append(heading, note);
                     container.hidden = false;
                     document.getElementById('passwordPrompt').hidden = true;
 
@@ -550,8 +557,15 @@
                     const decryptedBuf = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: ivBuf }, key, encryptedBuf);
                     const blob = new Blob([decryptedBuf]);
                     const blobUrl = URL.createObjectURL(blob);
-                    container.innerHTML = '<h2>' + filename + '</h2>' +
-                        '<a class="button" href="' + blobUrl + '" download="' + filename.replace(/"/g, '&quot;') + '">Download ' + filename + '</a>';
+                    container.replaceChildren();
+                    const doneHeading = document.createElement('h2');
+                    doneHeading.textContent = filename;
+                    const link = document.createElement('a');
+                    link.className = 'button';
+                    link.href = blobUrl;
+                    link.download = filename;
+                    link.textContent = 'Download ' + filename;
+                    container.append(doneHeading, link);
                 }
             } catch (e) {
                 errorEl.textContent = 'Decryption failed. Wrong password?';
@@ -584,7 +598,17 @@
             html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
             html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
             html = html.replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>');
-            html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+            html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, label, target) => {
+                const url = target.trim();
+                // Only http(s), mailto and scheme-less links become anchors. Any other
+                // scheme (javascript:, data:, vbscript:, ...) stays plain text. The
+                // scheme is read from a whitespace-stripped copy so tabs/newlines
+                // cannot smuggle javascript: past this check.
+                const scheme = url.replace(/\s+/g, '').match(/^([A-Za-z][A-Za-z0-9+.-]*):/);
+                if (scheme && !/^(https?|mailto)$/i.test(scheme[1])) return match;
+                const href = url.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+                return '<a href="' + href + '" target="_blank" rel="noopener noreferrer">' + label + '</a>';
+            });
             html = html.replace(/^> (.+)$/gm, '<blockquote>$1</blockquote>');
             html = html.replace(/^---$/gm, '<hr>');
             html = html.replace(/^- (.+)$/gm, '&bull; $1');

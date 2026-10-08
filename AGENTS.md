@@ -37,7 +37,7 @@ Temporary file and text sharing platform with dual storage (Vercel Blob default 
 | `pa_proxy/fly.toml` | Fly.io config |
 | `README.md` | Documentation |
 
-## Features Implemented (39 → 107 tests)
+## Features Implemented (39 → 112 tests)
 
 ### Core Features
 1. Paste text/files
@@ -111,12 +111,19 @@ Temporary file and text sharing platform with dual storage (Vercel Blob default 
 47. **Challenge route**: `GET /.well-known/openai-apps-challenge` returns `OPENAI_APPS_CHALLENGE_TOKEN` as exact `text/plain`, 404 with empty body while unset; stays noindex
 48. **`client_address()`** extracted from `limit_requests` so MCP byte accounting reuses the exact trusted-proxy IP logic
 
+### Preview Security — `fix/preview-security` (F0)
+49. **Encrypted preview gate**: `/api/preview/<key>` returns 400 `Encrypted shares preview after unlocking.` for `is_encrypted` rows before any storage fetch, so ciphertext is never proxied
+50. **Decrypt path is DOM-only**: password unlock builds headings, decrypted text and the download link with `createElement` + `textContent`/`.download` (no `innerHTML`), so a filename or decrypted payload is never parsed as HTML
+51. **Markdown link allowlist**: `renderMarkdown()` anchors only `http`, `https`, `mailto` and scheme-less links — the scheme is read from a whitespace-stripped copy so `java\tscript:` cannot slip through; any other scheme stays plain text; links keep `target="_blank"` and now carry `rel="noopener noreferrer"`
+52. **One preview source of truth**: `_preview_category()` is exposed to templates as `preview_category` through `template_settings()`; the page no longer keeps its own extension list, and dotfiles (`.env`, `.gitignore`, `.dockerfile`, `.makefile`) plus bare `dockerfile`/`makefile` (`PREVIEW_FILENAMES`) match for both the page and the API
+53. **Litterbox preview fetch**: `/api/preview` GETs Litterbox with `LITTERBOX_REQUEST_UA = 'curl/8.5.0'` (BunkerWeb rejects the default python-requests agent)
+
 ## All Validation Patterns
 - **Custom codes**: `[A-Za-z0-9]{3,20}` (backend + frontend + download page input)
 - **Auto-generated keys**: `f'{secrets.randbelow(100_000):05d}'` (5-digit numeric)
 - **Download key input**: `pattern="[A-Za-z0-9]{3,20}" maxlength="20" inputmode="text"`
 - **File size limit**: 1GB default (`1_000_000_000` bytes)
-- **Preview extensions**: image, video, audio, pdf, code categories
+- **Preview categories**: single source `_preview_category()` (`PREVIEW_EXTENSIONS` suffixes + `PREVIEW_FILENAMES`), passed to templates as `preview_category`
 
 ## Bugs Fixed (Audit)
 1. Three routes (`/bulk-download`, `/download-folder/`, `/download-folder-zip/`) used old `[0-9]{5}` validation — fixed to `[A-Za-z0-9]{3,20}`
@@ -131,8 +138,8 @@ Temporary file and text sharing platform with dual storage (Vercel Blob default 
 10. `renderUpload()` key validation: `^\d{5}$` → `^[A-Za-z0-9]{3,20}$`
 
 ## Testing
-- 107 tests passing (100 run + 7 skipped): `python3 -m unittest discover -v` → `test_download.py` (40) + `test_mcp.py` (53) + `test_pages.py` (7) + `test_postgres.py` (7, skips without `ALIENX_TEST_DATABASE_URL`)
-- Website tests cover: upload, download, text, file, folder, encryption, rate limiting, CSP headers, QR codes, preview endpoint, custom codes, dark mode, template escaping
+- 112 tests passing (105 run + 7 skipped): `python3 -m unittest discover -v` → `test_download.py` (45) + `test_mcp.py` (53) + `test_pages.py` (7) + `test_postgres.py` (7, skips without `ALIENX_TEST_DATABASE_URL`)
+- Website tests cover: upload, download, text, file, folder, encryption, rate limiting, CSP headers, QR codes, preview endpoint, custom codes, dark mode, template escaping, encrypted-preview 400, Litterbox preview User-Agent, preview-category page parity, decrypt DOM contract, markdown link allowlist (executes `renderMarkdown` in `node`)
 - MCP tests cover: handshake, tools/list schema, all 5 tools, expiry aliases, auth (missing/wrong/right key), disabled 404, rate buckets, daily byte budgets (per-IP + global, fail-closed DB path, window reset), JSON-RPC error matrix, 413/415/403/405, DB-failure JSON shape, encrypted-share no-ciphertext, no-secrets sweep
 - Pages tests cover: DB-free rendering, indexable headers/canonicals, fact-checked privacy/terms content, support email gating, challenge token exact-by-body/plain-text behavior, discovery untouched
 
