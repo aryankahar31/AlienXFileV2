@@ -1135,6 +1135,7 @@ with patch('flask_app.time.time', return_value=float(sys.argv[2])), patch(
         start = source.index('function renderMarkdown')
         end = source.index('// Code file preview loader')
         section = source[start:end]
+        self.assertIn('return html;', section)
         self.assertIn('rel="noopener noreferrer"', section)
         self.assertNotIn("'<a href=\"$2\"", section)
         payloads = [
@@ -1149,6 +1150,7 @@ with patch('flask_app.time.time', return_value=float(sys.argv[2])), patch(
             '[click](/relative/path)',
             '[click](#section)',
             '<script>alert(1)</script> [ok](https://example.com)',
+            '# Ctrl **b** *i*',
         ]
         blocked = payloads[:6]
         node_script = (
@@ -1171,7 +1173,12 @@ with patch('flask_app.time.time', return_value=float(sys.argv[2])), patch(
         self.assertEqual(len(outputs), len(payloads))
         for payload, output in zip(blocked, outputs[:len(blocked)]):
             with self.subTest(payload=payload):
+                # Rejected schemes must survive verbatim as plain text: no anchor,
+                # no href attribute, and never diverted into a code-block render.
+                self.assertEqual(output, payload)
                 self.assertNotIn('<a ', output)
+                self.assertNotIn('href=', output)
+                self.assertNotIn('<pre><code>', output)
         self.assertIn('<a href="https://example.com/page?a=1&amp;b=2" target="_blank" '
                       'rel="noopener noreferrer">click</a>', outputs[6])
         self.assertIn('<a href="mailto:someone@example.com"', outputs[7])
@@ -1180,6 +1187,72 @@ with patch('flask_app.time.time', return_value=float(sys.argv[2])), patch(
         self.assertNotIn('<script>', outputs[10])
         self.assertIn('&lt;script&gt;', outputs[10])
         self.assertIn('<a href="https://example.com"', outputs[10])
+        # Control payload: proves the extraction executed the real markdown parser
+        # (headers/bold/emitter) instead of passing input through untouched.
+        self.assertEqual(outputs[11], '<h1>Ctrl <strong>b</strong> <em>i</em></h1>')
+
+    def test_preview_media_markup_lightbox_and_zip_omission(self):
+        cases = {
+            '92001': ('photo.png', ['id="previewContainer"',
+                                    '<img class="preview-media preview-image"',
+                                    'id="previewImage"', 'src="/api/preview/92001"',
+                                    'title="Click to zoom"']),
+            '92002': ('clip.mp4', ['<video class="preview-media preview-video" controls',
+                                   '<source src="/api/preview/92002">']),
+            '92003': ('song.mp3', ['<audio class="preview-audio" controls',
+                                   '<source src="/api/preview/92003">']),
+            '92004': ('doc.pdf', ['<embed class="preview-pdf" src="/api/preview/92004"',
+                                  'type="application/pdf"']),
+            '92005': ('notes.py', ['id="previewCodeContent"', 'id="previewCopyBtn"',
+                                   'id="codeFontUp"', 'id="codeFontDown"',
+                                   'id="previewTruncation"']),
+            '92006': ('archive.zip', None),
+        }
+        pages = {}
+        for key, (name, needles) in cases.items():
+            self.insert_share(key, name)
+            response = self.client.get(f'/share/{key}')
+            self.assertEqual(response.status_code, 200, name)
+            pages[key] = response.get_data(as_text=True)
+            with self.subTest(name=name):
+                if needles is None:
+                    self.assertNotIn('id="previewContainer"', pages[key])
+                    self.assertNotIn('id="previewCodeContent"', pages[key])
+                else:
+                    for needle in needles:
+                        self.assertIn(needle, pages[key])
+        image = pages['92001']
+        for needle in ('id="lightbox"', 'id="lightboxImg"', 'id="lightboxViewport"',
+                       'id="zoomIn"', 'id="zoomOut"', 'id="zoomReset"', 'id="lightboxClose"',
+                       'if (!lightbox || !previewImg) return;'):
+            self.assertIn(needle, image)
+        self.assertNotIn('onclick=', image)
+        for key in ('92002', '92003', '92004', '92005', '92006'):
+            self.assertNotIn('id="previewImage"', pages[key])
+
+    def test_preview_endpoint_serves_code_names_and_rejects_zip(self):
+        with patch('flask_app.requests.get') as mock_get:
+            for key, name, content in (('93001', '.env', 'SECRET=1\n'),
+                                       ('93002', 'Dockerfile', 'FROM alpine\n')):
+                self.insert_share(key, name, provider='litterbox')
+                file_resp = requests.Response()
+                file_resp.status_code = 200
+                file_resp._content = content.encode('utf-8')
+                file_resp._content_consumed = True
+                file_resp.headers['Content-Type'] = 'text/plain'
+                mock_get.return_value = file_resp
+                response = self.client.get(f'/api/preview/{key}')
+                with self.subTest(name=name):
+                    self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+                    self.assertEqual(response.get_json()['content'], content)
+            self.assertTrue(mock_get.called)
+            mock_get.reset_mock()
+            self.insert_share('93003', 'archive.zip', provider='litterbox')
+            response = self.client.get('/api/preview/93003')
+            self.assertEqual(response.status_code, 400)
+            self.assertIn('No preview available for this file type.',
+                          response.get_data(as_text=True))
+            mock_get.assert_not_called()
 
 
 if __name__ == '__main__':
