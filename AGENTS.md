@@ -37,7 +37,7 @@ Temporary file and text sharing platform with dual storage (Vercel Blob default 
 | `pa_proxy/fly.toml` | Fly.io config |
 | `README.md` | Documentation |
 
-## Features Implemented (39 → 112 tests)
+## Features Implemented (39 → 122 tests)
 
 ### Core Features
 1. Paste text/files
@@ -118,12 +118,25 @@ Temporary file and text sharing platform with dual storage (Vercel Blob default 
 52. **One preview source of truth**: `_preview_category()` is exposed to templates as `preview_category` through `template_settings()`; the page no longer keeps its own extension list, and dotfiles (`.env`, `.gitignore`, `.dockerfile`, `.makefile`) plus bare `dockerfile`/`makefile` (`PREVIEW_FILENAMES`) match for both the page and the API
 53. **Litterbox preview fetch**: `/api/preview` GETs Litterbox with `LITTERBOX_REQUEST_UA = 'curl/8.5.0'` (BunkerWeb rejects the default python-requests agent)
 
+### Filename/Path Hardening (branch `fix/filename-hardening`)
+54. **`/upload-litterbox` names**: `safe_share_name()` (werkzeug `secure_filename` + 255 cap + `Shared File` fallback) strips traversal, NUL/control chars, CR/LF, quotes, backslashes, non-ASCII; the banned-extension check runs on the sanitized name
+55. **ZIP entry safety**: `zip_entry_name(name, used)` in `/bulk-download` and `/download-folder-zip` — basename-only ASCII names, deterministic collision suffixes (`file-2.txt`), never overwrite or traverse
+56. **Storage URL revalidation**: `validated_storage_url(url, provider)` re-checks DB/manifest URLs before every ZIP/folder fetch or redirect (`LITTERBOX_URL_RE` or `checked_blob_url`); malicious URLs are skipped (bulk/zip) or 502 (member) with zero outbound requests and no Vercel token leak
+57. **Folder ZIP header**: `Content-Disposition` built via `headers.set(..., filename=...)` instead of string interpolation
+58. **`/api/url-meta` redirects**: manual follow capped at 3 hops (`URL_META_MAX_REDIRECTS`), scheme+host+private-IP revalidated on every hop, `allow_redirects=False`, `Too many redirects.` on exhaustion
+59. **New rate buckets**: `preview` (`PREVIEW_RATE_LIMIT=60`/600s = 2× lookup so share pages never bottleneck) and `urlmeta` (`URL_META_RATE_LIMIT=30`/600s = lookup-strict because it triggers outbound fetches); separate `rate_limits` actions, same window/prune
+60. **Shared Litterbox URL regex**: inline regexes in preview/direct-download/`upload-litterbox` replaced by `LITTERBOX_URL_RE`
+
 ## All Validation Patterns
 - **Custom codes**: `[A-Za-z0-9]{3,20}` (backend + frontend + download page input)
 - **Auto-generated keys**: `f'{secrets.randbelow(100_000):05d}'` (5-digit numeric)
 - **Download key input**: `pattern="[A-Za-z0-9]{3,20}" maxlength="20" inputmode="text"`
 - **File size limit**: 1GB default (`1_000_000_000` bytes)
 - **Preview categories**: single source `_preview_category()` (`PREVIEW_EXTENSIONS` suffixes + `PREVIEW_FILENAMES`), passed to templates as `preview_category`
+- **Stored/ZIP names**: `safe_share_name()` (`secure_filename` + ≤255); ZIP collisions get `-2`, `-3`… suffixes via `zip_entry_name()`
+- **Storage URLs**: revalidated by `validated_storage_url()` (`LITTERBOX_URL_RE` or `checked_blob_url`) before any fetch/redirect from DB or folder manifests
+- **url-meta**: ≤3 redirect hops, scheme/host/private-IP checked per hop, private-IP redirects → 403
+- **Rate buckets**: `upload`/`lookup` (30), `preview` (60), `urlmeta` (30) per 600s + MCP buckets; `mcp_bytes` rows never pruned by the global sweep
 
 ## Bugs Fixed (Audit)
 1. Three routes (`/bulk-download`, `/download-folder/`, `/download-folder-zip/`) used old `[0-9]{5}` validation — fixed to `[A-Za-z0-9]{3,20}`
@@ -138,8 +151,8 @@ Temporary file and text sharing platform with dual storage (Vercel Blob default 
 10. `renderUpload()` key validation: `^\d{5}$` → `^[A-Za-z0-9]{3,20}$`
 
 ## Testing
-- 112 tests passing (105 run + 7 skipped): `python3 -m unittest discover -v` → `test_download.py` (45) + `test_mcp.py` (53) + `test_pages.py` (7) + `test_postgres.py` (7, skips without `ALIENX_TEST_DATABASE_URL`)
-- Website tests cover: upload, download, text, file, folder, encryption, rate limiting, CSP headers, QR codes, preview endpoint, custom codes, dark mode, template escaping, encrypted-preview 400, Litterbox preview User-Agent, preview-category page parity, decrypt DOM contract, markdown link allowlist (executes `renderMarkdown` in `node`)
+- 122 tests passing (115 run + 7 skipped): `python3 -m unittest discover -v` → `test_download.py` (55) + `test_mcp.py` (53) + `test_pages.py` (7) + `test_postgres.py` (7, skips without `ALIENX_TEST_DATABASE_URL`)
+- Website tests cover: upload, download, text, file, folder, encryption, rate limiting, CSP headers, QR codes, preview endpoint, custom codes, dark mode, template escaping, encrypted-preview 400, Litterbox preview User-Agent, preview-category page parity, decrypt DOM contract, markdown link allowlist (executes `renderMarkdown` in `node`), hostile filename sanitization, ZIP traversal/collision safety, storage-URL revalidation, url-meta redirect hardening, preview/urlmeta rate buckets
 - MCP tests cover: handshake, tools/list schema, all 5 tools, expiry aliases, auth (missing/wrong/right key), disabled 404, rate buckets, daily byte budgets (per-IP + global, fail-closed DB path, window reset), JSON-RPC error matrix, 413/415/403/405, DB-failure JSON shape, encrypted-share no-ciphertext, no-secrets sweep
 - Pages tests cover: DB-free rendering, indexable headers/canonicals, fact-checked privacy/terms content, support email gating, challenge token exact-by-body/plain-text behavior, discovery untouched
 

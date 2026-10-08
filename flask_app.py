@@ -20,7 +20,7 @@ from flask import Flask, Response, g, jsonify, redirect, render_template, reques
 from qrcode.image.svg import SvgPathImage
 from psycopg.rows import dict_row
 from requests_toolbelt.multipart.encoder import MultipartEncoder
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 from werkzeug.exceptions import HTTPException
 from werkzeug.utils import secure_filename
 
@@ -61,6 +61,14 @@ app.config.update(
     MAX_TEXT_LENGTH=100_000,
     UPLOAD_RATE_LIMIT=30,
     LOOKUP_RATE_LIMIT=30,
+    # One share page makes 1 lookup + typically 1 preview call (code files) or
+    # ~3-5 for media (browser range/preload probes). Keep preview at 2x lookup so
+    # ordinary browsing never bottlenecks on it, while capping probing at 60
+    # requests per window per IP instead of unlimited.
+    PREVIEW_RATE_LIMIT=60,
+    # url-meta triggers outbound fetches (quasi-proxy), so match the strict
+    # lookup budget; pasting a URL is a rare interaction (1 call per paste).
+    URL_META_RATE_LIMIT=30,
     RATE_WINDOW_SECONDS=600,
     # MCP endpoint (POST /mcp): off unless explicitly enabled; API key optional.
     MCP_ENABLED=os.environ.get('ALIENX_MCP_ENABLED', '0') == '1',
@@ -204,6 +212,50 @@ def _is_private_host(hostname):
     return False
 
 
+LITTERBOX_URL_RE = r'https://litter\.catbox\.moe/[A-Za-z0-9][A-Za-z0-9._-]*'
+URL_META_MAX_REDIRECTS = 3
+
+
+def validated_storage_url(url, provider):
+    """Re-check a storage URL from the database/manifest before fetching or redirecting."""
+    if provider == 'litterbox':
+        if not isinstance(url, str) or not re.fullmatch(LITTERBOX_URL_RE, url):
+            raise ValueError('Invalid storage link.')
+        return url
+    if provider == 'vercel':
+        return checked_blob_url(url)
+    raise ValueError('Unknown storage provider.')
+
+
+def safe_share_name(name, fallback='download'):
+    """ASCII, traversal-free basename for stored names and ZIP entry names."""
+    cleaned = secure_filename(str(name or '')[:1024])
+    if not cleaned:
+        return fallback
+    return cleaned[:255]
+
+
+def zip_entry_name(name, used):
+    """Deterministic archive-safe entry name; suffixes collisions instead of overwriting."""
+    base = safe_share_name(name, fallback='file')
+    if base not in used:
+        used.add(base)
+        return base
+    stem, dot, ext = base.rpartition('.')
+    if not dot:
+        stem, ext = base, ''
+    else:
+        ext = '.' + ext
+    counter = 2
+    while True:
+        suffix = f'-{counter}{ext}'
+        candidate = stem[:max(1, 255 - len(suffix))] + suffix
+        if candidate not in used:
+            used.add(candidate)
+            return candidate
+        counter += 1
+
+
 def delete_blobs(urls):
     with requests.post(BLOB_API + '/delete', headers=blob_headers(),
                        json={'urls': [checked_blob_url(url) for url in urls]},
@@ -274,6 +326,12 @@ def limit_requests():
         window = app.config['RATE_WINDOW_SECONDS']
         if request.method == 'POST':
             request.max_content_length = 4096
+    elif request.endpoint == 'preview_file':
+        action, limit = 'preview', app.config['PREVIEW_RATE_LIMIT']
+        window = app.config['RATE_WINDOW_SECONDS']
+    elif request.endpoint == 'url_meta':
+        action, limit = 'urlmeta', app.config['URL_META_RATE_LIMIT']
+        window = app.config['RATE_WINDOW_SECONDS']
     elif request.path == '/mcp' and request.method == 'POST' and app.config.get('MCP_ENABLED'):
         if request.mimetype != 'application/json':
             return  # The /mcp view answers 415 without reading the body.
@@ -711,7 +769,7 @@ def upload_litterbox():
     """Accept a pre-uploaded Litterbox URL from the browser (direct upload path)."""
     data = request.get_json(silent=True) or {}
     url = (data.get('url') or '').strip()
-    name = (data.get('name') or '').strip()[:255]
+    name = safe_share_name(data.get('name'), fallback='Shared File')
     size = data.get('size', 0)
     expire = data.get('expire', '1h')
     custom_key = (data.get('customKey') or '').strip() or None
@@ -722,9 +780,7 @@ def upload_litterbox():
         return error_response('Custom code must be 3-20 letters or numbers.', 400)
     if expire not in expire_seconds:
         return error_response('Choose a valid share mode and expiration.', 400)
-    if not name:
-        name = 'Shared File'
-    if not re.fullmatch(r'https://litter\.catbox\.moe/[A-Za-z0-9][A-Za-z0-9._-]*', url):
+    if not re.fullmatch(LITTERBOX_URL_RE, url):
         return error_response('Invalid Litterbox URL.', 400)
     if not isinstance(size, (int, float)) or size < 0 or size > MAX_FILE_BYTES:
         return error_response('Invalid file size.', 400)
@@ -791,7 +847,7 @@ def preview_file(key):
         return error_response('No preview available for this file type.', 400)
     url = row['url']
     if row['provider'] == 'litterbox':
-        if not re.fullmatch(r'https://litter\.catbox\.moe/[A-Za-z0-9][A-Za-z0-9._-]*', url or ''):
+        if not re.fullmatch(LITTERBOX_URL_RE, url or ''):
             return error_response('Invalid storage link.', 502)
         try:
             upstream = requests.get(url, headers={'User-Agent': LITTERBOX_REQUEST_UA},
@@ -850,7 +906,7 @@ def download_share(key):
         return error_response('This share has expired. Ask the sender to upload it again.', 410)
     if request.endpoint == 'download_direct' and row['type'] == 'file':
         if row['provider'] == 'litterbox':
-            if not re.fullmatch(r'https://litter\.catbox\.moe/[A-Za-z0-9][A-Za-z0-9._-]*', row['url'] or ''):
+            if not re.fullmatch(LITTERBOX_URL_RE, row['url'] or ''):
                 return error_response('This file has an invalid storage link. Ask the sender to share it again.', 502)
             return redirect(row['url'])
         if row['provider'] != 'vercel':
@@ -887,6 +943,7 @@ def bulk_download():
     zip_buf = BytesIO()
     found = 0
     total_bytes = 0
+    used_names = set()
     with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
         for key in keys:
             if not isinstance(key, str) or not re.fullmatch(r'[A-Za-z0-9]{3,20}', key):
@@ -895,17 +952,18 @@ def bulk_download():
             if not row or row['type'] != 'file' or row['expires'] <= time.time():
                 continue
             try:
+                url = validated_storage_url(row['url'], row['provider'])
                 if row['provider'] == 'litterbox':
-                    resp = requests.get(row['url'], timeout=(10, 60))
+                    resp = requests.get(url, timeout=(10, 60))
                     if resp.status_code == 200:
                         content = resp.content
                         total_bytes += len(content)
                         if total_bytes > MAX_ZIP_TOTAL_BYTES:
                             continue
-                        zf.writestr(row['name'], content)
+                        zf.writestr(zip_entry_name(row['name'], used_names), content)
                         found += 1
                 elif row['provider'] == 'vercel':
-                    resp = requests.get(row['url'],
+                    resp = requests.get(url,
                                         headers={'Authorization': blob_headers()['Authorization'], 'Accept-Encoding': 'identity'},
                                         timeout=(10, 60))
                     if resp.status_code == 200:
@@ -913,7 +971,7 @@ def bulk_download():
                         total_bytes += len(content)
                         if total_bytes > MAX_ZIP_TOTAL_BYTES:
                             continue
-                        zf.writestr(row['name'], content)
+                        zf.writestr(zip_entry_name(row['name'], used_names), content)
                         found += 1
             except (requests.RequestException, ValueError):
                 continue
@@ -945,10 +1003,14 @@ def download_folder_file(key, index):
     file_info = files[index]
     provider = file_info.get('provider', 'vercel')
     try:
+        url = validated_storage_url(file_info.get('url'), provider)
+    except ValueError:
+        return error_response('Invalid storage link.', 502)
+    try:
         if provider == 'litterbox':
-            resp = requests.get(file_info['url'], timeout=(10, 60), allow_redirects=False)
+            resp = requests.get(url, timeout=(10, 60), allow_redirects=False)
         else:
-            resp = requests.get(file_info['url'],
+            resp = requests.get(url,
                                 headers={'Authorization': blob_headers()['Authorization'], 'Accept-Encoding': 'identity'},
                                 stream=True, timeout=(10, 60), allow_redirects=False)
     except (requests.RequestException, ValueError):
@@ -957,7 +1019,7 @@ def download_folder_file(key, index):
         resp.close()
         return error_response('File is unavailable.', 502)
     if provider == 'litterbox':
-        return redirect(file_info['url'])
+        return redirect(url)
     response = Response(resp.iter_content(chunk_size=64 * 1024), content_type='application/octet-stream')
     response.headers.set('Content-Disposition', 'attachment', filename=secure_filename(file_info['name']) or 'download')
     response.headers['Content-Length'] = str(file_info.get('size', 0))
@@ -984,13 +1046,15 @@ def download_folder_zip(key):
     zip_buf = BytesIO()
     found = 0
     total_bytes = 0
+    used_names = set()
     with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
         for file_info in files:
             try:
+                url = validated_storage_url(file_info.get('url'), file_info.get('provider', 'vercel'))
                 if file_info.get('provider') == 'litterbox':
-                    resp = requests.get(file_info['url'], timeout=(10, 60))
+                    resp = requests.get(url, timeout=(10, 60))
                 else:
-                    resp = requests.get(file_info['url'],
+                    resp = requests.get(url,
                                         headers={'Authorization': blob_headers()['Authorization'], 'Accept-Encoding': 'identity'},
                                         timeout=(10, 60))
                 if resp.status_code == 200:
@@ -998,15 +1062,17 @@ def download_folder_zip(key):
                     total_bytes += len(content)
                     if total_bytes > MAX_ZIP_TOTAL_BYTES:
                         continue
-                    zf.writestr(file_info['name'], content)
+                    zf.writestr(zip_entry_name(file_info.get('name'), used_names), content)
                     found += 1
             except (requests.RequestException, ValueError):
                 continue
     if not found:
         return error_response('No files could be downloaded.', 500)
     zip_buf.seek(0)
-    return Response(zip_buf.getvalue(), mimetype='application/zip',
-                    headers={'Content-Disposition': f'attachment; filename="{row["name"]}.zip"'})
+    response = Response(zip_buf.getvalue(), mimetype='application/zip')
+    response.headers.set('Content-Disposition', 'attachment',
+                         filename=safe_share_name(row['name'], fallback='folder') + '.zip')
+    return response
 
 
 @app.route('/api/url-meta', methods=['POST'])
@@ -1016,16 +1082,34 @@ def url_meta():
     if not url or not url.startswith(('http://', 'https://')):
         return jsonify(error='Provide a valid URL.'), 400
     try:
-        parsed = urlparse(url)
-        if parsed.hostname and _is_private_host(parsed.hostname):
-            return jsonify(error='Fetching private/internal URLs is not allowed.'), 403
-        resp = requests.get(url, timeout=(5, 10), headers={
-            'User-Agent': 'Mozilla/5.0 (compatible; AlienXFile/2.0)',
-            'Accept': 'text/html',
-        }, allow_redirects=True)
+        current = url
+        resp = None
+        for _ in range(URL_META_MAX_REDIRECTS + 1):
+            parsed = urlparse(current)
+            if parsed.scheme not in ('http', 'https') or not parsed.hostname:
+                return jsonify(error='Provide a valid URL.'), 400
+            if _is_private_host(parsed.hostname):
+                return jsonify(error='Fetching private/internal URLs is not allowed.'), 403
+            resp = requests.get(current, timeout=(5, 10), headers={
+                'User-Agent': 'Mozilla/5.0 (compatible; AlienXFile/2.0)',
+                'Accept': 'text/html',
+            }, allow_redirects=False)
+            if resp.status_code not in (301, 302, 303, 307, 308):
+                break
+            location = (resp.headers.get('Location') or '').strip()
+            if not location:
+                break
+            resp.close()
+            resp = None
+            current = urljoin(current, location)
+        else:
+            return jsonify(error='Too many redirects.'), 400
         if resp.status_code != 200:
-            return jsonify(error=f'Could not fetch URL (HTTP {resp.status_code}).'), 402
+            status = resp.status_code
+            resp.close()
+            return jsonify(error=f'Could not fetch URL (HTTP {status}).'), 402
         body = resp.text[:100_000]
+        resp.close()
         title = ''
         desc = ''
         for pattern, attr in [

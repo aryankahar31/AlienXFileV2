@@ -3,11 +3,14 @@ import json
 import re
 import runpy
 import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
+import ipaddress
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, closing
 from datetime import datetime
@@ -54,6 +57,7 @@ class DownloadTest(unittest.TestCase):
                                      UPLOAD_MAX_BYTES=1_000_000_000, LITTERBOX_MAX_BYTES=1_000_000_000,
                                      MAX_CONTENT_LENGTH=1_001_000_000,
                                      UPLOAD_RATE_LIMIT=1000, LOOKUP_RATE_LIMIT=1000,
+                                     PREVIEW_RATE_LIMIT=1000, URL_META_RATE_LIMIT=1000,
                                      RATE_WINDOW_SECONDS=60, TRUST_PYTHONANYWHERE_PROXY=False, TRUST_RENDER_PROXY=False))
         self.now = 1_800_000_000
         self.clock = contexts.enter_context(patch('flask_app.time.time', return_value=self.now))
@@ -1050,6 +1054,41 @@ with patch('flask_app.time.time', return_value=float(sys.argv[2])), patch(
                            (key, 'file', name, None, url, 9, expires or (self.now + 3600),
                             provider, salt, iv, is_encrypted))
 
+    def insert_folder(self, key, name, files, expires=None):
+        with app.app_context():
+            db = get_db()
+            with db:
+                db.execute('''INSERT INTO shares (key, type, name, content, url, size, expires,
+                                                  provider, salt, iv, is_encrypted)
+                              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                           (key, 'folder', name, json.dumps(files), None, 0,
+                            expires or (self.now + 3600), None, None, None, 0))
+
+    def file_response(self, content=b'hello', content_type='text/plain'):
+        response = requests.Response()
+        response.status_code = 200
+        response._content = content
+        response._content_consumed = True
+        response.headers['Content-Type'] = content_type
+        return response
+
+    def redirect_response(self, location, status=302):
+        response = requests.Response()
+        response.status_code = status
+        response.headers['Location'] = location
+        response._content = b''
+        response._content_consumed = True
+        return response
+
+    def fake_dns(self):
+        def getaddrinfo(host, *args, **kwargs):
+            try:
+                ipaddress.ip_address(host)
+                return [(socket.AF_INET, socket.SOCK_STREAM, 0, '', (host, 0))]
+            except ValueError:
+                return [(socket.AF_INET, socket.SOCK_STREAM, 0, '', ('93.184.216.34', 0))]
+        return patch('flask_app.socket.getaddrinfo', side_effect=getaddrinfo)
+
     def test_encrypted_file_preview_is_rejected_before_any_storage_read(self):
         self.insert_share('80001', 'secret.txt', provider='litterbox',
                           salt='c2FsdA==', iv='aXY=', is_encrypted=1)
@@ -1253,6 +1292,214 @@ with patch('flask_app.time.time', return_value=float(sys.argv[2])), patch(
             self.assertIn('No preview available for this file type.',
                           response.get_data(as_text=True))
             mock_get.assert_not_called()
+
+    def test_upload_litterbox_sanitizes_hostile_names(self):
+        cases = [
+            ('../../etc/passwd.txt', 'etc_passwd.txt'),
+            ('/etc/shadow.txt', 'etc_shadow.txt'),
+            ('..\\..\\Windows\\evil.txt', 'Windowsevil.txt'),
+            ('bad\x00name.txt', 'badname.txt'),
+            ('line\r\nbreak.txt', 'line_break.txt'),
+            ('qu"ote\'.txt', 'quote.txt'),
+            ('   ', 'Shared File'),
+            ('.....', 'Shared File'),
+            ('café.txt', 'cafe.txt'),
+            ('a' * 300 + '.txt', 'a' * 255),
+        ]
+        for raw, expected in cases:
+            response = self.client.post('/upload-litterbox', json={
+                'url': FILE_URL, 'name': raw, 'size': 5, 'expire': '1h',
+            })
+            with self.subTest(name=raw):
+                self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+                stored = response.get_json()['uploads'][0]['name']
+                self.assertEqual(stored, expected)
+                if stored != 'Shared File':
+                    self.assertRegex(stored, r'^[A-Za-z0-9_.-]+$')
+                self.assertLessEqual(len(stored), 255)
+                self.assertFalse(stored.startswith('.'))
+        for raw in ('evil.exe', '../evil.exe'):
+            response = self.client.post('/upload-litterbox', json={
+                'url': FILE_URL, 'name': raw, 'size': 5, 'expire': '1h',
+            })
+            with self.subTest(banned=raw):
+                self.assertEqual(response.status_code, 400)
+                self.assertIn('blocked', response.get_json()['error'])
+
+    def test_bulk_download_sanitizes_zip_entries_and_resolves_collisions(self):
+        hostile = [
+            ('70001', '../a.txt', b'first', 'a.txt'),
+            ('70002', '..\\a.txt', b'second', 'a-2.txt'),
+            ('70003', 'a.txt', b'third', 'a-3.txt'),
+            ('70004', 'bad\x00name.txt', b'fourth', 'badname.txt'),
+            ('70005', 'qu"ote\r\n.txt', b'fifth', 'quote_.txt'),
+        ]
+        for key, name, _, _ in hostile:
+            self.insert_share(key, name, provider='litterbox')
+        with patch('flask_app.requests.get') as mock_get:
+            mock_get.side_effect = [self.file_response(content) for _, _, content, _ in hostile]
+            response = self.client.post('/bulk-download', json={'keys': [key for key, *_ in hostile]})
+        self.assertEqual(response.status_code, 200)
+        with zipfile.ZipFile(BytesIO(response.data)) as archive:
+            names = archive.namelist()
+            self.assertEqual(names, [expected for *_, expected in hostile])
+            for _, _, content, expected in hostile:
+                self.assertEqual(archive.read(expected), content)
+            for name in names:
+                self.assertRegex(name, r'^[A-Za-z0-9_.-]+$')
+                self.assertNotIn('..', name)
+        for call in mock_get.call_args_list:
+            self.assertEqual(call.args[0], FILE_URL)
+
+    def test_bulk_download_skips_unvalidated_storage_urls(self):
+        self.insert_share('70101', 'trap.txt', provider='litterbox',
+                          url='https://evil.example.com/steal')
+        self.insert_share('70102', 'trap2.txt', provider='vercel',
+                          url='https://evil.example.com/token')
+        with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN), \
+                patch('flask_app.requests.get') as mock_get:
+            response = self.client.post('/bulk-download', json={'keys': ['70101', '70102']})
+            mock_get.assert_not_called()
+        self.assertEqual(response.status_code, 404)
+        self.assertIn('No valid files found', response.get_json()['error'])
+
+    def test_folder_routes_revalidate_urls_and_zip_is_collision_safe(self):
+        files = [
+            {'name': '../a.txt', 'url': FILE_URL, 'provider': 'litterbox', 'size': 6},
+            {'name': 'a.txt', 'url': 'https://litter.catbox.moe/other456.txt',
+             'provider': 'litterbox', 'size': 7},
+            {'name': 'evil.txt', 'url': 'https://evil.example.com/secret',
+             'provider': 'litterbox', 'size': 1},
+            {'name': 'trap.txt', 'url': 'https://evil.example.com/blob-token-harvest',
+             'provider': 'vercel', 'size': 1},
+            {'name': '../../doc.pdf', 'url': BLOB_URL, 'provider': 'vercel', 'size': 9},
+        ]
+        self.insert_folder('71001', 'bad"name', files)
+        with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN), \
+                patch('flask_app.requests.get') as mock_get:
+            mock_get.side_effect = [self.file_response(b'first!'),
+                                    self.file_response(b'second!'),
+                                    self.file_response(b'%PDF-1.4', 'application/pdf')]
+            response = self.client.get('/download-folder-zip/71001')
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual([call.args[0] for call in mock_get.call_args_list],
+                             [FILE_URL, 'https://litter.catbox.moe/other456.txt', BLOB_URL])
+            self.assertRegex(response.headers['Content-Disposition'],
+                             r'^attachment; filename="?badname\.zip"?$')
+            with zipfile.ZipFile(BytesIO(response.data)) as archive:
+                self.assertEqual(archive.namelist(), ['a.txt', 'a-2.txt', 'doc.pdf'])
+                self.assertEqual(archive.read('a.txt'), b'first!')
+                self.assertEqual(archive.read('a-2.txt'), b'second!')
+                self.assertEqual(archive.read('doc.pdf'), b'%PDF-1.4')
+        with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN), \
+                patch('flask_app.requests.get') as mock_get:
+            for index, fragment in ((2, 'Invalid storage link.'), (3, 'Invalid storage link.')):
+                response = self.client.get(f'/download-folder/71001/{index}')
+                with self.subTest(index=index):
+                    self.assertEqual(response.status_code, 502)
+                    self.assertIn(fragment, response.get_data(as_text=True))
+            mock_get.assert_not_called()
+        with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN), \
+                patch('flask_app.requests.get') as mock_get:
+            mock_get.return_value = self.file_response(b'%PDF-1.4', 'application/pdf')
+            response = self.client.get('/download-folder/71001/4')
+            self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+            self.assertEqual(mock_get.call_args.args[0], BLOB_URL)
+            self.assertIn('Bearer ', mock_get.call_args.kwargs['headers']['Authorization'])
+            self.assertRegex(response.headers['Content-Disposition'],
+                             r'^attachment; filename="?doc\.pdf"?$')
+
+    def test_url_meta_rejects_private_and_cross_scheme_redirects(self):
+        with self.fake_dns(), patch('flask_app.requests.get') as mock_get:
+            mock_get.side_effect = [self.redirect_response('http://169.254.169.254/latest/meta-data/')]
+            response = self.client.post('/api/url-meta', json={'url': 'https://public.example/page'})
+            self.assertEqual(response.status_code, 403)
+            self.assertIn('private/internal', response.get_json()['error'])
+            self.assertEqual(mock_get.call_count, 1)
+            mock_get.reset_mock()
+            mock_get.side_effect = [self.redirect_response('http://127.0.0.1:8080/admin')]
+            response = self.client.post('/api/url-meta', json={'url': 'https://public.example/page'})
+            self.assertEqual(response.status_code, 403)
+            self.assertEqual(mock_get.call_count, 1)
+            mock_get.reset_mock()
+            mock_get.side_effect = [self.redirect_response('javascript:alert(1)')]
+            response = self.client.post('/api/url-meta', json={'url': 'https://public.example/page'})
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(response.get_json()['error'], 'Provide a valid URL.')
+            self.assertEqual(mock_get.call_count, 1)
+            mock_get.reset_mock()
+            response = self.client.post('/api/url-meta', json={'url': 'http://10.0.0.5/x'})
+            self.assertEqual(response.status_code, 403)
+            mock_get.assert_not_called()
+
+    def test_url_meta_follows_bounded_redirect_hops(self):
+        with self.fake_dns(), patch('flask_app.requests.get') as mock_get:
+            mock_get.side_effect = [
+                self.redirect_response('https://public.example/b'),
+                self.redirect_response('https://public.example/c'),
+                self.redirect_response('https://public.example/d'),
+                self.redirect_response('https://public.example/e'),
+            ]
+            response = self.client.post('/api/url-meta', json={'url': 'https://public.example/a'})
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(response.get_json()['error'], 'Too many redirects.')
+            self.assertEqual(mock_get.call_count, 4)
+            mock_get.reset_mock()
+            mock_get.side_effect = [
+                self.redirect_response('https://public.example/b'),
+                self.redirect_response('https://public.example/c'),
+                self.redirect_response('https://public.example/d'),
+                self.file_response(b'<title>Three hops ok</title>'),
+            ]
+            response = self.client.post('/api/url-meta', json={'url': 'https://public.example/a'})
+            self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+            self.assertEqual(response.get_json()['title'], 'Three hops ok')
+            self.assertEqual(mock_get.call_count, 4)
+            mock_get.reset_mock()
+            mock_get.side_effect = [
+                self.redirect_response('/meta'),
+                self.file_response(b'<title>Relative ok</title>'),
+            ]
+            response = self.client.post('/api/url-meta', json={'url': 'https://public.example/page'})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.get_json()['title'], 'Relative ok')
+            self.assertEqual(mock_get.call_args_list[1].args[0], 'https://public.example/meta')
+            mock_get.reset_mock()
+            mock_get.side_effect = None
+            mock_get.return_value = requests.Response()
+            mock_get.return_value.status_code = 500
+            mock_get.return_value._content = b'boom'
+            mock_get.return_value._content_consumed = True
+            response = self.client.post('/api/url-meta', json={'url': 'https://public.example/page'})
+            self.assertEqual(response.status_code, 402)
+            self.assertEqual(response.get_json()['error'], 'Could not fetch URL (HTTP 500).')
+
+    def test_url_meta_rate_limit_is_separate_and_persistent(self):
+        with self.fake_dns(), patch.dict(app.config, URL_META_RATE_LIMIT=2), \
+                patch('flask_app.requests.get') as mock_get:
+            mock_get.side_effect = lambda *a, **k: self.file_response(b'<title>ok</title>')
+            for status in (200, 200, 429):
+                response = self.client.post('/api/url-meta', json={'url': 'https://public.example/'})
+                self.assertEqual(response.status_code, status)
+            self.assertIn(int(response.headers['Retry-After']), (60, 61))
+            self.assertEqual(self.client.get('/share/99999').status_code, 404)
+            self.clock.return_value = self.now + 61
+            response = self.client.post('/api/url-meta', json={'url': 'https://public.example/'})
+            self.assertEqual(response.status_code, 200)
+
+    def test_preview_rate_limit_is_separate_from_lookup_bucket(self):
+        self.insert_share('72001', 'notes.txt', provider='litterbox')
+        with patch.dict(app.config, PREVIEW_RATE_LIMIT=2), \
+                patch('flask_app.requests.get') as mock_get:
+            mock_get.side_effect = lambda *a, **k: self.file_response(b'hello')
+            for status in (200, 200, 429):
+                response = self.client.get('/api/preview/72001')
+                self.assertEqual(response.status_code, status)
+            self.assertIn(int(response.headers['Retry-After']), (60, 61))
+            self.assertEqual(self.client.get('/share/72001').status_code, 200)
+            self.assertEqual(self.client.post('/download', data={'key': '72001'}).status_code, 303)
+            self.clock.return_value = self.now + 61
+            self.assertEqual(self.client.get('/api/preview/72001').status_code, 200)
 
 
 if __name__ == '__main__':
