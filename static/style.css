@@ -515,6 +515,21 @@ body.dark .folder-file { border-bottom-color: #21262d; }
 .custom-code-section input:focus { outline: none; box-shadow: var(--shadow); }
 .custom-code-section input::placeholder { color: #bbb; }
 
+/* ========== SEPARATE CODES OPTION ========== */
+.separate-code-section {
+    margin-bottom: 4px;
+}
+.separate-code-toggle {
+    display: flex; align-items: center; gap: 10px;
+    font-weight: 600; font-size: 14px; cursor: pointer; min-height: 44px;
+}
+.separate-code-toggle input[type="checkbox"] {
+    width: 20px; height: 20px; flex: none; accent-color: var(--black); cursor: pointer;
+}
+.separate-code-toggle input[type="checkbox"]:disabled { opacity: .5; cursor: not-allowed; }
+#separateCodesHint { margin-top: 0; color: #888; }
+body.dark #separateCodesHint { color: #8b949e; }
+
 /* ========== UPLOAD HISTORY ========== */
 .history-section {
     margin-top: 20px; border: var(--border); border-radius: var(--radius);

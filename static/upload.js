@@ -86,6 +86,15 @@ const customKeyInput = document.getElementById("customCode");
 // ══════════════════════════════════════════════════════════════════════════════
 const passwordInput = document.getElementById("sharePassword");
 
+// ══════════════════════════════════════════════════════════════════════════════
+// Advanced option: upload each file with a separate code (default OFF).
+// ══════════════════════════════════════════════════════════════════════════════
+const separateCodesInput = document.getElementById("separateCodes");
+
+function separateCodesEnabled(mode) {
+    return mode === "file" && Boolean(separateCodesInput && separateCodesInput.checked);
+}
+
 const hasCrypto = typeof crypto !== "undefined" && crypto.subtle;
 
 function bufToBase64(buffer) {
@@ -255,6 +264,30 @@ textInput.addEventListener("input", () => {
 // ══════════════════════════════════════════════════════════════════════════════
 // Core: Mode switching, file validation, file list update
 // ══════════════════════════════════════════════════════════════════════════════
+// One share per batch: a folder or multi-file File-tab selection is posted once
+// to /upload-folder and becomes a single code with an on-demand ZIP.
+const MAX_BATCH_FILES = 50;
+
+function passwordBlockedReason() {
+    const mode = form.elements.mode.value;
+    if (mode === "folder") return "Password protection is not available for folder shares.";
+    if (mode === "file" && fileInput.files.length > 1) {
+        return "Password protection is not available for multi-file shares. Select exactly one file to use a password.";
+    }
+    return "";
+}
+
+function syncPasswordState() {
+    const reason = passwordBlockedReason();
+    passwordInput.disabled = Boolean(reason);
+    if (reason) passwordInput.value = "";
+    const note = document.getElementById("passwordNotice");
+    if (note) {
+        note.textContent = reason;
+        note.hidden = !reason;
+    }
+}
+
 function switchMode() {
     const mode = form.elements.mode.value;
     const isFile = mode === "file" || mode === "folder";
@@ -266,6 +299,7 @@ function switchMode() {
     textInput.required = !isFile;
     const pasteHint = document.getElementById("pasteHint");
     if (pasteHint) pasteHint.hidden = mode === "folder";
+    if (separateCodesInput) separateCodesInput.disabled = mode !== "file";
     if (mode === "folder") {
         fileInput.setAttribute("webkitdirectory", "");
         fileInputText.textContent = "Select a folder to upload";
@@ -273,6 +307,7 @@ function switchMode() {
         fileInput.removeAttribute("webkitdirectory");
         fileInputText.textContent = "Drop files here or click to browse";
     }
+    syncPasswordState();
 }
 
 function fileError(file, storageProvider) {
@@ -306,9 +341,21 @@ function updateFiles() {
     }
     storageProviderInput.value = needsLitterbox ? "litterbox" : "vercel";
     if (storageNote) storageNote.hidden = !needsLitterbox;
-    document.getElementById("fileLimits").textContent = needsLitterbox
-        ? `Large file detected. Using temporary third-party storage (~1 GB limit).`
-        : `Up to ${form.dataset.limitLabel} per file.`;
+    const multiFile = isFileMode && fileInput.files.length > 1;
+    const separateOn = multiFile && separateCodesEnabled("file");
+    const multiNote = document.getElementById("multiFileNote");
+    if (multiNote) {
+        multiNote.hidden = !multiFile;
+        multiNote.textContent = !multiFile ? ""
+            : separateOn
+                ? `${fileInput.files.length} files will each get their own share code, link and expiry.`
+                : `${fileInput.files.length} files will be shared under one code with a "Download All as ZIP" button.`;
+    }
+    document.getElementById("fileLimits").textContent = multiFile && !separateOn
+        ? `Up to ${form.dataset.limitLabel} per file; max ${MAX_BATCH_FILES} files and ${form.dataset.limitLabel} combined per share.`
+        : needsLitterbox
+            ? `Large file detected. Using temporary third-party storage (~1 GB limit).`
+            : `Up to ${form.dataset.limitLabel} per file.`;
     selectedFiles.replaceChildren();
     for (const file of fileInput.files) {
         const item = document.createElement("li");
@@ -320,6 +367,7 @@ function updateFiles() {
     fileInputText.textContent = fileInput.files.length
         ? `${fileInput.files.length} file(s) selected. Choose again to replace.`
         : "Drop files here or click to browse";
+    syncPasswordState();
 }
 
 form.querySelectorAll('input[name="mode"]').forEach(radio => radio.addEventListener("change", () => {
@@ -333,6 +381,7 @@ form.addEventListener("reset", () => requestAnimationFrame(() => {
     updateFiles();
 }));
 fileInput.addEventListener("change", updateFiles);
+if (separateCodesInput) separateCodesInput.addEventListener("change", updateFiles);
 
 // ══════════════════════════════════════════════════════════════════════════════
 // FEATURE 10: File type icons in results
@@ -496,6 +545,15 @@ function renderUpload(upload, batch) {
     codeLine.textContent = `Code: ${upload.key}`;
     const links = document.createElement("div");
     links.className = "result-links";
+    const batchFiles = Array.isArray(upload.files) ? upload.files : [];
+    if (upload.type === "folder" && batchFiles.length > 1) {
+        const zipLink = document.createElement("a");
+        zipLink.className = "bulk-download-btn";
+        zipLink.href = `/download-folder-zip/${upload.key}`;
+        zipLink.textContent = `Download All as ZIP (${batchFiles.length} files)`;
+        zipLink.setAttribute("aria-label", `Download all ${batchFiles.length} files as one ZIP archive`);
+        links.append(zipLink);
+    }
     for (const [label, value] of [["Copy Code", String(upload.key)], ["Copy Link", pageURL.href]]) {
         const button = document.createElement("button");
         button.type = "button";
@@ -664,6 +722,22 @@ form.addEventListener("submit", async event => {
     }
 
     const queue = (mode === "file" || mode === "folder") ? Array.from(fileInput.files) : [null];
+    // One code per batch: a folder selection, or more than one file in File mode
+    // with the separate-code option OFF, is posted once so the whole selection
+    // shares a single share/ZIP. The option is only ever read, never toggled.
+    const isFileKind = mode === "file" || mode === "folder";
+    const separateCodes = separateCodesEnabled(mode);
+    const useFolderBatch = isFileKind && queue.length > 0 &&
+        (mode === "folder" || (queue.length > 1 && !separateCodes));
+    const batchLabel = mode === "folder" ? "folder upload" : "multi-file upload";
+    if (useFolderBatch && queue.length > MAX_BATCH_FILES) {
+        status.textContent = `Select at most ${MAX_BATCH_FILES} files to share under one code.`;
+        return;
+    }
+    if (password && passwordBlockedReason()) {
+        status.textContent = passwordBlockedReason();
+        return;
+    }
     busy = true;
     cancelled = false;
     controls.disabled = true;
@@ -688,19 +762,19 @@ form.addEventListener("submit", async event => {
         failures++;
     };
     try {
-        if (mode === "folder" && queue.length > 0) {
+        if (useFolderBatch) {
             const data = new FormData();
             data.append("expire", expire);
             if (customKey) data.append("customKey", customKey);
             for (const file of queue) data.append("file", file, file.name);
             progress.value = 0;
-            status.textContent = `Uploading ${queue.length} files as folder...`;
+            status.textContent = `Uploading ${queue.length} files as one share...`;
             let xhr;
             for (let attempt = 0; attempt < 3; attempt++) {
-                xhr = await uploadRequest(data, "folder upload", "/upload-folder");
+                xhr = await uploadRequest(data, batchLabel, "/upload-folder");
                 if (xhr.status !== 429) break;
                 const retryAfter = parseInt(xhr.getResponseHeader("Retry-After") || "30", 10);
-                status.textContent = `Folder upload rate limited. Retrying in ${retryAfter}s...`;
+                status.textContent = `${batchLabel} rate limited. Retrying in ${retryAfter}s...`;
                 await new Promise(r => setTimeout(r, retryAfter * 1000));
             }
             let response;
@@ -722,7 +796,7 @@ form.addEventListener("submit", async event => {
                 }
             }
             for (const error of errors) addError(error);
-            if ((xhr.status < 200 || xhr.status >= 300) && !errors.length) addError("Folder upload failed.");
+            if ((xhr.status < 200 || xhr.status >= 300) && !errors.length) addError(`${batchLabel} failed.`);
         } else {
         for (const [index, file] of queue.entries()) {
             const name = file ? file.name : "Shared Text";

@@ -1501,6 +1501,477 @@ with patch('flask_app.time.time', return_value=float(sys.argv[2])), patch(
             self.clock.return_value = self.now + 61
             self.assertEqual(self.client.get('/api/preview/72001').status_code, 200)
 
+    # ══════════════════════════════════════════════════════════════════════
+    # Multi-file selections share ONE code (File tab posts one batch request)
+    # ══════════════════════════════════════════════════════════════════════
+
+    def batch_upload(self, files, **extra):
+        """Post a multi-file selection the way the File tab now does: one
+        request to /upload-folder, with the Vercel PUT mocked per file."""
+        payload = {'expire': extra.pop('expire', '1h')}
+        payload.update(extra)
+        payload['file'] = [(BytesIO(body), name) for name, body in files]
+        urls = ['https://teststore.private.blob.vercel-storage.com/shares/'
+                f'{index:032x}/blob{index}' for index in range(len(files))]
+        with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN), \
+                patch('flask_app.requests.put') as put:
+            put.return_value.__enter__.return_value.status_code = 200
+            put.return_value.__enter__.return_value.json.side_effect = [{'url': url} for url in urls]
+            response = self.client.post('/upload-folder', data=payload)
+        return response
+
+    def test_multi_file_selection_creates_one_share_for_the_whole_batch(self):
+        files = [('photo1.jpg', b'JPEG-ONE'), ('photo2.png', b'PNG-TWO'),
+                 ('document.pdf', b'%PDF-1.4 batch'), ('video.mp4', b'MP4-THREE'),
+                 ('notes.txt', b'plain notes')]
+        response = self.batch_upload(files, expire='12h')
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        result = response.get_json()
+        self.assertTrue(result['success'])
+        self.assertEqual(result['errors'], [])
+        share, = result['uploads']
+        # ONE code for the whole batch, one expiry, one row in the database.
+        with app.app_context():
+            rows = get_db().execute('SELECT key, type, expires FROM shares').fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['key'], share['key'])
+        self.assertEqual(share['type'], 'folder')
+        self.assertEqual(share['name'], '5 files')
+        self.assertIsNone(share['storageProvider'])
+        self.assertEqual(share['size'], sum(len(body) for _, body in files))
+        self.assertEqual(datetime.fromisoformat(share['expires']).timestamp(), self.now + 43200)
+        # The share holds every file from the selection, in order, with sizes.
+        self.assertEqual([f['name'] for f in share['files']], [name for name, _ in files])
+        self.assertEqual([f['size'] for f in share['files']],
+                         [len(body) for _, body in files])
+        self.assertEqual({f['provider'] for f in share['files']}, {'vercel'})
+        # The share page represents the batch: a listing, per-file download
+        # links, and the "Download All as ZIP" button. No single-file preview.
+        page = self.client.get(f'/share/{share["key"]}')
+        self.assertEqual(page.status_code, 200)
+        html = page.get_data(as_text=True)
+        self.assertIn('5 files', html)
+        self.assertIn('Download All as ZIP', html)
+        self.assertNotIn('id="previewContainer"', html)
+        for index, (name, _) in enumerate(files):
+            with self.subTest(index=index, name=name):
+                self.assertIn(f'/download-folder/{share["key"]}/{index}', html)
+                self.assertIn(name, html)
+
+    def test_batch_share_downloads_each_file_and_one_safe_zip(self):
+        files = [('a.txt', b'first-a'), ('../a.txt', b'second-a'),
+                 ('sub/notes.txt', b'nested-notes'), ('../../etc/passwd.txt', b'escape')]
+        response = self.batch_upload(files)
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        result = response.get_json()
+        share, = result['uploads']
+        # Hostile names are sanitized before storage: no separators, no traversal.
+        stored = [f['name'] for f in share['files']]
+        self.assertEqual(stored, ['a.txt', 'a.txt', 'sub_notes.txt', 'etc_passwd.txt'])
+        for name in stored:
+            self.assertNotIn('/', name)
+            self.assertNotIn('\\', name)
+        self.assertFalse(any(name.startswith('.') for name in stored))
+        # Individual downloads stream exactly one file each.
+        for index, (_, body) in enumerate(files):
+            with self.subTest(index=index):
+                with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN), \
+                        patch('flask_app.requests.get') as mock_get:
+                    mock_get.return_value = self.file_response(body)
+                    single = self.client.get(f'/download-folder/{share["key"]}/{index}')
+                self.assertEqual(single.status_code, 200, single.get_data(as_text=True))
+                self.assertEqual(single.data, body)
+                self.assertIn('attachment', single.headers['Content-Disposition'])
+        # The ZIP holds every file once, under safe names, without overwrites.
+        contents = [b'first-a', b'second-a', b'nested-notes', b'escape']
+        with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN), \
+                patch('flask_app.requests.get') as mock_get:
+            mock_get.side_effect = [self.file_response(body) for body in contents]
+            archive_response = self.client.get(f'/download-folder-zip/{share["key"]}')
+        self.assertEqual(archive_response.status_code, 200)
+        self.assertRegex(archive_response.headers['Content-Disposition'],
+                         r'^attachment; filename="?4_files\.zip"?$')
+        requested = [call.args[0] for call in mock_get.call_args_list]
+        self.assertEqual(requested, [f['url'] for f in share['files']])
+        with zipfile.ZipFile(BytesIO(archive_response.data)) as archive:
+            self.assertEqual(archive.namelist(),
+                             ['a.txt', 'a-2.txt', 'sub_notes.txt', 'etc_passwd.txt'])
+            self.assertEqual(archive.read('a.txt'), b'first-a')
+            self.assertEqual(archive.read('a-2.txt'), b'second-a')
+            self.assertEqual(archive.read('sub_notes.txt'), b'nested-notes')
+            self.assertEqual(archive.read('etc_passwd.txt'), b'escape')
+            self.assertEqual(len(set(archive.namelist())), 4)
+
+    def test_folder_selection_still_creates_one_share_with_flattened_paths(self):
+        files = [('holiday/notes.txt', b'n1'), ('holiday/photo.jpg', b'p1')]
+        response = self.batch_upload(files, expire='72h')
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        result = response.get_json()
+        self.assertTrue(result['success'])
+        share, = result['uploads']
+        self.assertEqual(share['type'], 'folder')
+        self.assertEqual(share['name'], '2 files')
+        self.assertEqual(datetime.fromisoformat(share['expires']).timestamp(), self.now + 259200)
+        self.assertEqual([f['name'] for f in share['files']],
+                         ['holiday_notes.txt', 'holiday_photo.jpg'])
+        with app.app_context():
+            self.assertEqual(get_db().execute('SELECT COUNT(*) FROM shares').fetchone()[0], 1)
+
+    def test_single_file_upload_keeps_file_share_preview_and_direct_download(self):
+        with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN), \
+                patch('flask_app.requests.put') as put:
+            put.return_value.__enter__.return_value.status_code = 200
+            put.return_value.__enter__.return_value.json.return_value = {'url': BLOB_URL}
+            response = self.client.post('/upload', data={
+                'mode': 'file', 'storageProvider': 'vercel', 'expire': '1h',
+                'file': (BytesIO(b'just one file'), 'solo.txt'),
+            })
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        result = response.get_json()
+        self.assertTrue(result['success'])
+        self.assertEqual(result['errors'], [])
+        share, = result['uploads']
+        self.assertEqual(share['type'], 'file')
+        self.assertEqual(share['name'], 'solo.txt')
+        self.assertTrue(share['page_url'].endswith(f'/share/{share["key"]}'))
+        with app.app_context():
+            self.assertEqual(get_db().execute('SELECT COUNT(*) FROM shares').fetchone()[0], 1)
+        # Direct link still streams the single file.
+        with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN), \
+                patch('flask_app.requests.get') as mock_get:
+            mock_get.return_value = self.file_response(b'just one file')
+            direct = self.client.get(f'/download/{share["key"]}')
+        self.assertEqual(direct.status_code, 200)
+        self.assertEqual(direct.data, b'just one file')
+        # Preview still works for the single file.
+        with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN), \
+                patch('flask_app.requests.get') as mock_get:
+            mock_get.return_value = self.file_response(b'print(1)', 'text/plain')
+            preview = self.client.get(f'/api/preview/{share["key"]}')
+        self.assertEqual(preview.status_code, 200)
+        self.assertIn(b'print(1)', preview.data)
+        page = self.client.get(f'/share/{share["key"]}')
+        self.assertIn('id="previewContainer"', page.get_data(as_text=True))
+
+    def test_single_file_encryption_still_protects_share_content(self):
+        with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN), \
+                patch('flask_app.requests.put') as put:
+            put.return_value.__enter__.return_value.status_code = 200
+            put.return_value.__enter__.return_value.json.return_value = {'url': BLOB_URL}
+            response = self.client.post('/upload', data={
+                'mode': 'file', 'storageProvider': 'vercel', 'expire': '1h',
+                'isEncrypted': '1', 'salt': 'c2FsdA==', 'iv': 'aXY=',
+                'file': (BytesIO(b'ciphertext-bytes'), 'secret.txt'),
+            })
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        share, = response.get_json()['uploads']
+        self.assertTrue(share['is_encrypted'])
+        page = self.client.get(f'/share/{share["key"]}')
+        html = page.get_data(as_text=True)
+        self.assertEqual(page.status_code, 200)
+        self.assertIn('password-prompt', html)
+        self.assertNotIn('id="previewContainer"', html)
+        # Ciphertext is never proxied by the preview endpoint.
+        with patch('flask_app.requests.get') as mock_get:
+            preview = self.client.get(f'/api/preview/{share["key"]}')
+            mock_get.assert_not_called()
+        self.assertEqual(preview.status_code, 400)
+
+    def test_batch_upload_refuses_password_flag_and_creates_no_share(self):
+        with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN):
+            response = self.client.post('/upload-folder', data={
+                'expire': '1h', 'isEncrypted': '1',
+                'file': [(BytesIO(b'one'), 'a.txt'), (BytesIO(b'two'), 'b.txt')],
+            })
+        self.assertEqual(response.status_code, 400)
+        body = response.get_json()
+        self.assertFalse(body['success'])
+        self.assertEqual(body['uploads'], [])
+        self.assertIn('Password protection is not supported', body['error'])
+        with app.app_context():
+            self.assertEqual(get_db().execute('SELECT COUNT(*) FROM shares').fetchone()[0], 0)
+        self.post.assert_not_called()
+
+    def test_expired_batch_cannot_be_downloaded(self):
+        files = [{'name': 'a.txt', 'url': FILE_URL, 'provider': 'litterbox', 'size': 1},
+                 {'name': 'b.txt', 'url': FILE_URL, 'provider': 'litterbox', 'size': 1}]
+        for index, template in enumerate(('/download-folder/{key}/0',
+                                          '/download-folder-zip/{key}',
+                                          '/share/{key}')):
+            key = f'711{index:02d}'
+            self.insert_folder(key, '2 files', files, expires=self.now - 1)
+            with self.subTest(path=template):
+                with patch('flask_app.requests.get') as mock_get:
+                    response = self.client.get(template.format(key=key))
+                self.assertEqual(response.status_code, 410,
+                                 response.get_data(as_text=True))
+                self.assertNotIn('a.txt', response.get_data(as_text=True))
+                mock_get.assert_not_called()
+        with app.app_context():
+            self.assertEqual(
+                get_db().execute('SELECT COUNT(*) FROM shares WHERE expires <= ?',
+                                 (self.now,)).fetchone()[0], 0)
+
+    def test_batch_upload_accepts_the_full_fifty_file_form_ceiling(self):
+        files = [(f'file{i}.txt', f'body-{i}'.encode()) for i in range(50)]
+        response = self.batch_upload(files)
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        share, = response.get_json()['uploads']
+        self.assertEqual(share['name'], '50 files')
+        self.assertEqual(len(share['files']), 50)
+        too_many = self.batch_upload(files + [('one-too-many.txt', b'x')])
+        self.assertEqual(too_many.status_code, 400)
+        self.assertIn('1 and 50 files', too_many.get_json()['error'])
+
+    def test_upload_page_multi_file_one_code_contract(self):
+        html = self.client.get('/').get_data(as_text=True)
+        self.assertIn('upload.js?v=8', html)
+        self.assertIn('id="multiFileNote"', html)
+        self.assertIn('id="passwordNotice"', html)
+        js = (Path(app.root_path) / 'static' / 'upload.js').read_text(encoding='utf-8')
+        self.assertIn('(mode === "folder" || (queue.length > 1 && !separateCodes))', js)
+        self.assertIn('passwordBlockedReason()', js)
+        self.assertIn('MAX_BATCH_FILES = 50', js)
+        self.assertIn('"/upload-folder"', js)
+        self.assertIn('uploadRequest(data, batchLabel, "/upload-folder")', js)
+        self.assertIn('/download-folder-zip/', js)
+        self.assertIn('Download All as ZIP', js)
+        # Single-file and text uploads still use the original /upload route.
+        self.assertIn('xhr = await uploadRequest(data, label);', js)
+
+    def _upload_js(self):
+        return (Path(app.root_path) / 'static' / 'upload.js').read_text(encoding='utf-8')
+
+    def test_default_batch_option_off_three_files_share_one_code_and_zip(self):
+        html = self.client.get('/').get_data(as_text=True)
+        # Default OFF: the option is opt-in and is never pre-checked.
+        self.assertIn('id="separateCodes"', html)
+        self.assertNotRegex(html, r'<input type="checkbox" id="separateCodes"[^>]*checked')
+        self.assertIn('Upload each file with a separate code', html)
+        js = self._upload_js()
+        # With the option OFF a multi-file selection goes to /upload-folder.
+        self.assertIn('(mode === "folder" || (queue.length > 1 && !separateCodes))', js)
+        self.assertIn('"/upload-folder"', js)
+        files = [('one.txt', b'ONE-BODY'), ('two.txt', b'TWO-BODY'), ('three.txt', b'THREE-BODY')]
+        response = self.batch_upload(files, expire='12h')
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        result = response.get_json()
+        self.assertTrue(result['success'])
+        self.assertEqual(result['errors'], [])
+        share, = result['uploads']
+        # Exactly ONE share code and ONE expiry for the three files.
+        with app.app_context():
+            rows = get_db().execute('SELECT key, type, expires FROM shares').fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['key'], share['key'])
+        self.assertEqual(share['type'], 'folder')
+        self.assertEqual(share['name'], '3 files')
+        self.assertEqual(datetime.fromisoformat(share['expires']).timestamp(), self.now + 43200)
+        self.assertEqual([f['name'] for f in share['files']],
+                         ['one.txt', 'two.txt', 'three.txt'])
+        # The share page lists every file with its own Download action...
+        page_html = self.client.get(f'/share/{share["key"]}').get_data(as_text=True)
+        self.assertIn('Download All as ZIP', page_html)
+        for index, (name, _) in enumerate(files):
+            with self.subTest(index=index):
+                self.assertIn(f'/download-folder/{share["key"]}/{index}', page_html)
+                self.assertIn(name, page_html)
+        # ...each file streams individually...
+        for index, (_, body) in enumerate(files):
+            with self.subTest(index=index):
+                with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN), \
+                        patch('flask_app.requests.get') as mock_get:
+                    mock_get.return_value = self.file_response(body)
+                    single = self.client.get(f'/download-folder/{share["key"]}/{index}')
+                self.assertEqual(single.status_code, 200, single.get_data(as_text=True))
+                self.assertEqual(single.data, body)
+        # ...and the batch ZIP holds all three.
+        with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN), \
+                patch('flask_app.requests.get') as mock_get:
+            mock_get.side_effect = [self.file_response(body) for _, body in files]
+            archive = self.client.get(f'/download-folder-zip/{share["key"]}')
+        self.assertEqual(archive.status_code, 200)
+        with zipfile.ZipFile(BytesIO(archive.data)) as bundle:
+            self.assertEqual(bundle.namelist(), ['one.txt', 'two.txt', 'three.txt'])
+            self.assertEqual(bundle.read('two.txt'), b'TWO-BODY')
+
+    def test_separate_codes_option_creates_three_independent_file_shares(self):
+        js = self._upload_js()
+        self.assertIn('function separateCodesEnabled(mode)', js)
+        self.assertIn('mode === "file" && Boolean(separateCodesInput && '
+                      'separateCodesInput.checked)', js)
+        self.assertIn('queue.length > 1 && !separateCodes', js)
+        # The setting is only read; nothing ever switches it on or off for the user.
+        self.assertNotRegex(js, r'separateCodesInput\.checked\s*=')
+        # Option ON posts each file through the untouched single-file /upload flow.
+        self.mock_provider()
+        keys = []
+        for index, name in enumerate(('one.txt', 'two.txt', 'three.txt')):
+            with self.subTest(name=name):
+                response = self.client.post('/upload', data={
+                    'mode': 'file', 'storageProvider': 'litterbox', 'expire': '72h',
+                    'file': (BytesIO(f'body-{index}'.encode()), name),
+                })
+                self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+                result = response.get_json()
+                self.assertTrue(result['success'])
+                self.assertEqual(result['errors'], [])
+                share, = result['uploads']
+                self.assertEqual(share['type'], 'file')
+                self.assertEqual(share['name'], name)
+                # The selected expiry is preserved for every file.
+                self.assertEqual(datetime.fromisoformat(share['expires']).timestamp(),
+                                 self.now + 259200)
+                keys.append(share['key'])
+        self.assertEqual(len(set(keys)), 3)
+        with app.app_context():
+            self.assertEqual(get_db().execute('SELECT COUNT(*) FROM shares').fetchone()[0], 3)
+        for key in keys:
+            with self.subTest(key=key):
+                self.assertEqual(self.client.get(f'/share/{key}').status_code, 200)
+        self.assertEqual(self.post.call_count, 3)
+
+    def test_exactly_one_file_keeps_the_original_single_file_path(self):
+        js = self._upload_js()
+        # A single selected file never takes the batch branch, whatever the option says.
+        self.assertIn('queue.length > 1 && !separateCodes', js)
+        self.assertIn('xhr = await uploadRequest(data, label);', js)
+        self.mock_provider()
+        response = self.client.post('/upload', data={
+            'mode': 'file', 'storageProvider': 'litterbox', 'expire': '1h',
+            'file': (BytesIO(b'only-one'), 'solo.txt'),
+        })
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        share, = response.get_json()['uploads']
+        self.assertEqual(share['type'], 'file')
+        self.assertEqual(share['name'], 'solo.txt')
+        with app.app_context():
+            rows = get_db().execute('SELECT key, type FROM shares').fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['type'], 'file')
+        # No batch listing and no ZIP button on a one-file share.
+        page_html = self.client.get(f'/share/{share["key"]}').get_data(as_text=True)
+        self.assertIn('id="previewContainer"', page_html)
+        self.assertNotIn('Download All as ZIP', page_html)
+
+    def test_folder_uploads_ignore_the_separate_codes_option(self):
+        js = self._upload_js()
+        # Folder mode is tested before the option is consulted, so it cannot apply.
+        self.assertIn('(mode === "folder" || (queue.length > 1 && !separateCodes))', js)
+        # ...and the control is disabled outside the File tab instead of silently ignored.
+        self.assertIn('separateCodesInput.disabled = mode !== "file"', js)
+        self.assertIn('function separateCodesEnabled(mode) {\n    return mode === "file"', js)
+        # Folder behaviour itself is unchanged: one share, flattened paths, one code.
+        files = [('docs/readme.md', b'# readme'), ('docs/app.py', b'print(1)')]
+        response = self.batch_upload(files, expire='72h')
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        share, = response.get_json()['uploads']
+        self.assertEqual(share['type'], 'folder')
+        self.assertEqual(share['name'], '2 files')
+        self.assertEqual(datetime.fromisoformat(share['expires']).timestamp(), self.now + 259200)
+        self.assertEqual([f['name'] for f in share['files']],
+                         ['docs_readme.md', 'docs_app.py'])
+        with app.app_context():
+            self.assertEqual(get_db().execute('SELECT COUNT(*) FROM shares').fetchone()[0], 1)
+
+    def test_separate_code_failures_are_reported_without_hiding_successes(self):
+        self.mock_provider()
+        outcomes = []
+        for name, body in (('good1.txt', b'G1'), ('bad.exe', b'nope'), ('good2.txt', b'G2')):
+            outcomes.append(self.client.post('/upload', data={
+                'mode': 'file', 'storageProvider': 'litterbox', 'expire': '1h',
+                'file': (BytesIO(body), name),
+            }))
+        good1, bad, good2 = outcomes
+        # The valid files still upload and keep their own codes...
+        for good, name in ((good1, 'good1.txt'), (good2, 'good2.txt')):
+            with self.subTest(name=name):
+                self.assertEqual(good.status_code, 200, good.get_data(as_text=True))
+                result = good.get_json()
+                self.assertTrue(result['success'])
+                self.assertEqual(result['errors'], [])
+                self.assertEqual(result['uploads'][0]['name'], name)
+                self.assertEqual(result['uploads'][0]['type'], 'file')
+        # ...while the rejected file is named in the error and stores nothing.
+        self.assertEqual(bad.status_code, 400)
+        body_json = bad.get_json()
+        self.assertFalse(body_json['success'])
+        self.assertEqual(body_json['uploads'], [])
+        self.assertEqual(len(body_json['errors']), 1)
+        self.assertIn('bad.exe', body_json['errors'][0])
+        self.assertIn('blocked', body_json['errors'][0])
+        keys = [good1.get_json()['uploads'][0]['key'], good2.get_json()['uploads'][0]['key']]
+        self.assertNotEqual(keys[0], keys[1])
+        with app.app_context():
+            self.assertEqual(get_db().execute('SELECT COUNT(*) FROM shares').fetchone()[0], 2)
+        # Only the two valid files ever reached storage.
+        self.assertEqual(self.post.call_count, 2)
+
+    def test_separate_codes_option_does_not_regress_encryption_preview_or_limits(self):
+        # Upload limits are unchanged: /upload still caps 10 files per request...
+        response = self.client.post('/upload', data={'storageProvider': 'litterbox',
+                                                     'expire': '1h',
+                                                     'file': [(BytesIO(b'x'), f'{i}.txt')
+                                                              for i in range(11)]})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('between 1 and 10 files', response.get_json()['error'])
+        # ...and a batch still caps at 50 files.
+        with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN):
+            response = self.client.post('/upload-folder', data={
+                'expire': '1h',
+                'file': [(BytesIO(b'x'), f'{i}.txt') for i in range(51)],
+            })
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('between 1 and 50 files', response.get_json()['error'])
+        self.post.assert_not_called()
+        with app.app_context():
+            self.assertEqual(get_db().execute('SELECT COUNT(*) FROM shares').fetchone()[0], 0)
+        # Single-file password encryption is unaffected by the new option.
+        with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN), \
+                patch('flask_app.requests.put') as put:
+            put.return_value.__enter__.return_value.status_code = 200
+            put.return_value.__enter__.return_value.json.return_value = {'url': BLOB_URL}
+            response = self.client.post('/upload', data={
+                'mode': 'file', 'storageProvider': 'vercel', 'expire': '1h',
+                'isEncrypted': '1', 'salt': 'c2FsdA==', 'iv': 'aXY=',
+                'file': (BytesIO(b'ciphertext-bytes'), 'secret.txt'),
+            })
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        share, = response.get_json()['uploads']
+        self.assertTrue(share['is_encrypted'])
+        share_html = self.client.get(f'/share/{share["key"]}').get_data(as_text=True)
+        self.assertIn('password-prompt', share_html)
+        self.assertNotIn('id="previewContainer"', share_html)
+        # Ciphertext is still never proxied by the preview endpoint.
+        with patch('flask_app.requests.get') as mock_get:
+            preview = self.client.get(f'/api/preview/{share["key"]}')
+            mock_get.assert_not_called()
+        self.assertEqual(preview.status_code, 400)
+
+    def test_upload_page_separate_codes_option_contract(self):
+        html = self.client.get('/').get_data(as_text=True)
+        self.assertIn('upload.js?v=8', html)
+        self.assertIn('id="separateCodes"', html)
+        self.assertIn('for="separateCodes"', html)
+        self.assertNotRegex(html, r'<input type="checkbox" id="separateCodes"[^>]*checked')
+        self.assertIn('Upload each file with a separate code', html)
+        self.assertIn('id="separateCodesHint"', html)
+        self.assertIn('Generate a separate share code and link for every file instead of '
+                      'sharing all files under one code.', html)
+        # The control lives inside the existing Advanced options section.
+        summary = html.index('Advanced options')
+        box = html.index('id="separateCodes"')
+        self.assertTrue(summary < box < html.index('</details>', summary))
+        js = self._upload_js()
+        self.assertIn('const separateCodesInput = document.getElementById("separateCodes");', js)
+        self.assertIn('separateCodesInput.disabled = mode !== "file"', js)
+        self.assertIn('separateCodesInput.addEventListener("change", updateFiles)', js)
+        self.assertIn('(queue.length > 1 && !separateCodes)', js)
+        self.assertIn('files will each get their own share code, link and expiry', js)
+        # Never auto-switched by file count, and the single-file route is untouched.
+        self.assertNotRegex(js, r'separateCodesInput\.checked\s*=')
+        self.assertIn('xhr = await uploadRequest(data, label);', js)
+
 
 if __name__ == '__main__':
     unittest.main()

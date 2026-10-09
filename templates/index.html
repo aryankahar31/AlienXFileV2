@@ -22,7 +22,7 @@
     {{ {'@context': 'https://schema.org', '@type': 'WebSite', 'name': 'AlienXFile', 'alternateName': 'AlienXFile V2', 'url': site_url, 'description': description}|tojson }}
     </script>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-    <script src="{{ url_for('static', filename='upload.js') }}?v=6" defer></script>
+    <script src="{{ url_for('static', filename='upload.js') }}?v=8" defer></script>
 </head>
 <body>
 
@@ -76,6 +76,7 @@
                 <p class="notice">Blocked: {{ banned_exts | join(', ') }}.</p>
                 <p class="notice paste-hint" id="pasteHint">You can also paste images from clipboard (Ctrl+V)</p>
                 <p class="notice" id="storageNote" hidden>Large file detected. It will be uploaded to temporary third-party storage.</p>
+                <p class="notice" id="multiFileNote" hidden aria-live="polite"></p>
                 <ul id="selectedFiles" aria-label="Selected files"></ul>
             </div>
 
@@ -108,10 +109,18 @@
             <details class="advanced-section">
                 <summary>Advanced options</summary>
                 <div class="advanced-inner">
+                    <div class="separate-code-section">
+                        <label class="separate-code-toggle" for="separateCodes">
+                            <input type="checkbox" id="separateCodes">
+                            <span>Upload each file with a separate code</span>
+                        </label>
+                        <p class="notice" id="separateCodesHint">Generate a separate share code and link for every file instead of sharing all files under one code. Applies to the File tab; folder uploads always share one code.</p>
+                    </div>
                     <div class="password-section">
                         <label for="sharePassword">Password protection (optional)</label>
                         <input type="password" id="sharePassword" name="sharePassword" placeholder="Leave empty for no password" autocomplete="new-password">
                         <p class="notice">Encrypts content in your browser. Password never leaves your device.</p>
+                        <p class="notice error-msg" id="passwordNotice" hidden aria-live="polite"></p>
                     </div>
                     <div class="custom-code-section">
                         <label for="customCode">Custom code (optional)</label>

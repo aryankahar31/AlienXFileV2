@@ -37,7 +37,7 @@ Temporary file and text sharing platform with dual storage (Vercel Blob default 
 | `pa_proxy/fly.toml` | Fly.io config |
 | `README.md` | Documentation |
 
-## Features Implemented (39 → 122 tests)
+## Features Implemented (39 → 138 tests)
 
 ### Core Features
 1. Paste text/files
@@ -127,6 +127,16 @@ Temporary file and text sharing platform with dual storage (Vercel Blob default 
 59. **New rate buckets**: `preview` (`PREVIEW_RATE_LIMIT=60`/600s = 2× lookup so share pages never bottleneck) and `urlmeta` (`URL_META_RATE_LIMIT=30`/600s = lookup-strict because it triggers outbound fetches); separate `rate_limits` actions, same window/prune
 60. **Shared Litterbox URL regex**: inline regexes in preview/direct-download/`upload-litterbox` replaced by `LITTERBOX_URL_RE`
 
+### Multi-File Single-Code Batches
+61. **One code per batch**: a File-tab selection of >1 file now posts a single `/upload-folder` request (instead of one `/upload` per file), so the whole batch becomes one `type='folder'` share with one code, one expiry and one DB row; exactly one file keeps the original `/upload` path. Server enforces 1–50 files per batch
+62. **Batch result panel + share page**: `renderUpload()` adds a "Download All as ZIP (N files)" link to `/download-folder-zip/<key>` for folder shares, alongside the existing share-page button and per-file Download links (reuse of `download_folder_file` / `download_folder_zip`, `zip_entry_name`, `validated_storage_url`)
+63. **Encryption never silently weakened**: `/upload-folder` returns 400 for `isEncrypted=1` instead of storing plaintext; the UI disables the password field with a visible reason for folder and multi-file shares (`passwordBlockedReason()`/`syncPasswordState()`); single-file password encryption is unchanged
+64. **`MAX_FORM_PARTS` 20 → 60**: the old ceiling capped multipart batches at ~18 files with a misleading 413; `/upload-folder` now also returns its per-file `errors` on success, and batch names use correct singular/plural ("1 file" / "5 files")
+
+### Separate-Codes Option + Production Batch Bug
+65. **`☐ Upload each file with a separate code`** (Advanced options, default OFF): when ON, each selected file is posted independently through the untouched single-file `/upload` route → own code, link, expiry, result card, preview/QR/encryption; when OFF (default) a multi-file selection posts once to `/upload-folder` → one code + ZIP. Routing is `mode === "folder" || (queue.length > 1 && !separateCodes)`; `separateCodesEnabled()` only ever *reads* `.checked` (never auto-toggles), and `separateCodesInput.disabled = mode !== "file"` so folders/text can never silently apply it; `#multiFileNote` wording and `#fileLimits` batch text switch with the option
+66. **Production bug (3 codes for 3 files) root-caused**: live site serves `origin/main` `d556f89` with `upload.js?v=6` (`useFolderBatch` absent, per-file `uploadRequest(data, label)` loop present) while HTML is `no-store` and JS is `no-cache`+ETag → **not stale cache, not a stray handler: the batch implementation was never deployed** (it is uncommitted on `fix/filename-hardening`). Production remains unfixed pending a deploy
+
 ## All Validation Patterns
 - **Custom codes**: `[A-Za-z0-9]{3,20}` (backend + frontend + download page input)
 - **Auto-generated keys**: `f'{secrets.randbelow(100_000):05d}'` (5-digit numeric)
@@ -151,8 +161,8 @@ Temporary file and text sharing platform with dual storage (Vercel Blob default 
 10. `renderUpload()` key validation: `^\d{5}$` → `^[A-Za-z0-9]{3,20}$`
 
 ## Testing
-- 122 tests passing (115 run + 7 skipped): `python3 -m unittest discover -v` → `test_download.py` (55) + `test_mcp.py` (53) + `test_pages.py` (7) + `test_postgres.py` (7, skips without `ALIENX_TEST_DATABASE_URL`)
-- Website tests cover: upload, download, text, file, folder, encryption, rate limiting, CSP headers, QR codes, preview endpoint, custom codes, dark mode, template escaping, encrypted-preview 400, Litterbox preview User-Agent, preview-category page parity, decrypt DOM contract, markdown link allowlist (executes `renderMarkdown` in `node`), hostile filename sanitization, ZIP traversal/collision safety, storage-URL revalidation, url-meta redirect hardening, preview/urlmeta rate buckets
+- 138 tests passing (131 run + 7 skipped): `python3 -m unittest discover -v` → `test_download.py` (71) + `test_mcp.py` (53) + `test_pages.py` (7) + `test_postgres.py` (7, skips without `ALIENX_TEST_DATABASE_URL`)
+- Website tests cover: upload, download, text, file, folder, encryption, rate limiting, CSP headers, QR codes, preview endpoint, custom codes, dark mode, template escaping, encrypted-preview 400, Litterbox preview User-Agent, preview-category page parity, decrypt DOM contract, markdown link allowlist (executes `renderMarkdown` in `node`), hostile filename sanitization, ZIP traversal/collision safety, storage-URL revalidation, url-meta redirect hardening, preview/urlmeta rate buckets, multi-file single-code batches (one share, per-file download, ZIP names/duplicates/traversal, expiry, password refusal, 50-file form ceiling, frontend contract), separate-codes option (default OFF batch vs opt-in per-file `/upload`, single-file path, folder ignore, partial-failure reporting, no-regression guards)
 - MCP tests cover: handshake, tools/list schema, all 5 tools, expiry aliases, auth (missing/wrong/right key), disabled 404, rate buckets, daily byte budgets (per-IP + global, fail-closed DB path, window reset), JSON-RPC error matrix, 413/415/403/405, DB-failure JSON shape, encrypted-share no-ciphertext, no-secrets sweep
 - Pages tests cover: DB-free rendering, indexable headers/canonicals, fact-checked privacy/terms content, support email gating, challenge token exact-by-body/plain-text behavior, discovery untouched
 

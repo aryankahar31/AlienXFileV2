@@ -57,7 +57,10 @@ app.config.update(
     LITTERBOX_MAX_BYTES=MAX_FILE_BYTES,
     MAX_CONTENT_LENGTH=MAX_FILE_BYTES + 1_000_000,
     MAX_FORM_MEMORY_SIZE=500_000,
-    MAX_FORM_PARTS=20,
+    # Multipart part ceiling: one multi-file batch holds up to 50 file parts plus
+    # metadata fields (expire, customKey, mode, provider). 20 capped batches at
+    # ~18 files and returned a misleading 413 "code is too long".
+    MAX_FORM_PARTS=60,
     MAX_TEXT_LENGTH=100_000,
     UPLOAD_RATE_LIMIT=30,
     LOOKUP_RATE_LIMIT=30,
@@ -661,6 +664,10 @@ def upload_folder():
         return error_response('Custom code must be 3-20 letters or numbers.', 400)
     if expiry not in expire_seconds:
         return error_response('Choose a valid expiration.', 400)
+    if request.form.get('isEncrypted') == '1':
+        # Folder/batch shares never encrypt. Ignoring the flag would create a
+        # plaintext share the sender believes is password-protected, so refuse.
+        return error_response('Password protection is not supported for multi-file shares.', 400)
     if not app.config['BLOB_READ_WRITE_TOKEN']:
         return error_response('AlienXFile Storage is temporarily unavailable.', 503)
     files = request.files.getlist('file')
@@ -742,7 +749,7 @@ def upload_folder():
         detail = '; '.join(errors[:3]) if errors else 'No files were uploaded successfully.'
         return error_response(detail, 400)
     total_size = sum(f['size'] for f in file_list)
-    folder_name = f'{len(file_list)} files'
+    folder_name = f'{len(file_list)} file' + ('s' if len(file_list) != 1 else '')
     content_json = json.dumps(file_list)
     try:
         shared = save_share('folder', folder_name, total_size, expires, content=content_json,
@@ -761,7 +768,9 @@ def upload_folder():
             except (requests.RequestException, ValueError):
                 pass
         return error_response(str(exc), 503)
-    return jsonify(success=True, uploads=[shared], errors=[])
+    # Surface per-file failures alongside the successful share: a batch that
+    # silently dropped files would look complete on the result panel.
+    return jsonify(success=True, uploads=[shared], errors=errors)
 
 
 @app.route('/upload-litterbox', methods=['POST'])
