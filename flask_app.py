@@ -1,3 +1,4 @@
+import base64
 import html as html_mod
 import ipaddress
 import json
@@ -7,6 +8,7 @@ import re
 import secrets
 import socket
 import sqlite3
+import threading
 import time
 import zipfile
 from datetime import datetime, timezone
@@ -31,6 +33,46 @@ logger = logging.getLogger(__name__)
 
 MAX_FILE_BYTES = 1_000_000_000  # 1 GB, decimal, plus separate multipart overhead below.
 MAX_ZIP_TOTAL_BYTES = 500_000_000  # 500 MB total for ZIP downloads
+# EFM1 encrypted folder manifest: GCM ciphertext of the name/size/IV list for up
+# to 50 files. Length caps are checked before any base64 decode so a hostile
+# form field cannot force a large allocation.
+MAX_MANIFEST_BYTES = 131_072
+MAX_MANIFEST_B64_CHARS = (MAX_MANIFEST_BYTES + 2) // 3 * 4 + 4
+CIPHER_BUNDLE_MAGIC = b'AXFC1'
+# One encrypted-archive build at a time: /download-folder-cipher retains up to
+# MAX_ZIP_TOTAL_BYTES of ciphertext per request and the free Render instance has
+# 512 MB of RAM with a 1-worker/4-thread gunicorn, so a second concurrent build
+# can push the process over its limit. The download page already surfaces 429
+# as a retryable error.
+_CIPHER_BUNDLE_SLOTS = threading.BoundedSemaphore(1)
+
+
+class _BundleStream:
+    """Bundle body iterator that releases its build slot exactly once.
+
+    WSGI servers call close() on the app iterable (Werkzeug wraps it in a
+    ClosingIterator) even when a client disconnects before the first byte, but
+    a never-started generator does not run its own finally block — so the
+    release lives here as well as in the generator, deduplicated by the
+    per-request release callback.
+    """
+
+    def __init__(self, chunks, release):
+        self._chunks = chunks
+        self._release = release
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return next(self._chunks)
+
+    def close(self):
+        try:
+            self._chunks.close()
+        finally:
+            self._release()
+
 upload_max_bytes = int(os.environ.get('ALIENX_UPLOAD_MAX_BYTES', 1_000_000_000))
 if not 0 < upload_max_bytes <= 1_000_000_000:
     raise ValueError('ALIENX_UPLOAD_MAX_BYTES must be between 1 and 1000000000 for AlienXFile Storage.')
@@ -322,7 +364,8 @@ def limit_requests():
         action, limit = 'upload', app.config['UPLOAD_RATE_LIMIT']
         window = app.config['RATE_WINDOW_SECONDS']
     elif request.endpoint in {'download_details', 'download_direct', 'share_qr',
-                              'bulk_download', 'download_folder_file', 'download_folder_zip'} or (
+                              'bulk_download', 'download_folder_file', 'download_folder_zip',
+                              'download_folder_cipher'} or (
         request.endpoint == 'download_page' and request.method == 'POST'
     ):
         action, limit = 'lookup', app.config['LOOKUP_RATE_LIMIT']
@@ -399,7 +442,7 @@ def response_headers(response):
     return response
 
 
-def share_details(row):
+def share_details(row, page=False):
     result = dict(key=row['key'], type=row['type'], name=row['name'], content=row['content'],
                 storageProvider=row['provider'] if row['type'] == 'file' else None,
                 size=row['size'], expires=datetime.fromtimestamp(row['expires'], timezone.utc).isoformat(),
@@ -412,15 +455,48 @@ def share_details(row):
         result['iv'] = row['iv']
         if row['type'] == 'text':
             result['encrypted_content'] = row['content']
+        elif row['type'] == 'folder':
+            # EFM1: the page may only receive the GCM-authenticated manifest blob
+            # plus its count. Filenames, sizes, per-file IVs and storage URLs stay
+            # in the database until the recipient unlocks with the password.
+            if page:
+                parsed = None
+                if row['content']:
+                    try:
+                        parsed = json.loads(row['content'])
+                    except (json.JSONDecodeError, TypeError):
+                        parsed = None
+                manifest = parsed.get('manifest') if isinstance(parsed, dict) else None
+                files = parsed.get('files') if isinstance(parsed, dict) else None
+                if (not isinstance(manifest, dict) or
+                        not isinstance(manifest.get('iv'), str) or
+                        not isinstance(manifest.get('data'), str) or
+                        not isinstance(files, list)):
+                    raise ValueError('Folder data is corrupt.')
+                result['manifest'] = {'iv': manifest['iv'], 'data': manifest['data']}
+                result['count'] = len(files)
+                result.pop('content', None)
         else:
             result['encrypted_url'] = row['url']
     else:
         result['is_encrypted'] = False
-    if row['type'] == 'folder' and row['content']:
+    if page:
+        # The share page never renders raw storage content for non-text shares;
+        # encrypted folder pages additionally carry no file list at all.
+        if row['type'] != 'text' or is_enc:
+            result.pop('content', None)
+    if row['type'] == 'folder' and row['content'] and not (is_enc and page):
         try:
-            result['files'] = json.loads(row['content'])
+            parsed = json.loads(row['content'])
         except (json.JSONDecodeError, TypeError):
-            result['files'] = []
+            parsed = None
+        if is_enc:
+            # EFM1 wrapper: upload responses keep the (server-side) file list for
+            # the sender's own result panel; storage URLs are the sender's own.
+            files = parsed.get('files') if isinstance(parsed, dict) else None
+            result['files'] = files if isinstance(files, list) else []
+        else:
+            result['files'] = parsed if isinstance(parsed, list) else []
     return result
 
 
@@ -664,10 +740,34 @@ def upload_folder():
         return error_response('Custom code must be 3-20 letters or numbers.', 400)
     if expiry not in expire_seconds:
         return error_response('Choose a valid expiration.', 400)
-    if request.form.get('isEncrypted') == '1':
-        # Folder/batch shares never encrypt. Ignoring the flag would create a
-        # plaintext share the sender believes is password-protected, so refuse.
-        return error_response('Password protection is not supported for multi-file shares.', 400)
+    # EFM1: the browser derives one share key, encrypts every file, then uploads
+    # the ciphertext plus a GCM-authenticated manifest of names/sizes/IVs. The
+    # server can verify structure but never the password, so params are strict.
+    is_encrypted = request.form.get('isEncrypted') == '1'
+    salt = request.form.get('salt') or None
+    iv_val = request.form.get('iv') or None
+    manifest = request.form.get('manifest') or None
+    if is_encrypted or salt or iv_val or manifest:
+        if not is_encrypted:
+            # Stray encryption fields without the flag would silently drop the
+            # password protection the sender asked for.
+            return error_response('Encryption parameters provided without the isEncrypted flag.', 400)
+        if not salt or not iv_val or not manifest:
+            return error_response('Encryption parameters missing.', 400)
+        if len(salt) > 24 or len(iv_val) > 16 or len(manifest) > MAX_MANIFEST_B64_CHARS:
+            return error_response('Encryption parameters are too long.', 400)
+        try:
+            salt_bytes = base64.b64decode(salt, validate=True)
+            iv_bytes = base64.b64decode(iv_val, validate=True)
+            manifest_bytes = base64.b64decode(manifest, validate=True)
+        except ValueError:
+            return error_response('Encryption parameters must be valid base64.', 400)
+        if len(salt_bytes) != 16:
+            return error_response('Encryption salt must be 16 bytes.', 400)
+        if len(iv_bytes) != 12:
+            return error_response('Encryption IV must be 12 bytes.', 400)
+        if not 32 <= len(manifest_bytes) <= MAX_MANIFEST_BYTES:
+            return error_response('Encryption manifest is invalid.', 400)
     if not app.config['BLOB_READ_WRITE_TOKEN']:
         return error_response('AlienXFile Storage is temporarily unavailable.', 503)
     files = request.files.getlist('file')
@@ -681,6 +781,7 @@ def upload_folder():
     litterbox_limit = min(app.config['LITTERBOX_MAX_BYTES'], MAX_FILE_BYTES)
     proxy_url = app.config.get('LITTERBOX_PROXY_URL', '')
     proxy_secret = app.config.get('LITTERBOX_PROXY_SECRET', '')
+    stored_index = 0
     for file in files:
         filename = secure_filename(file.filename or '')
         if not filename or len(filename) > 255:
@@ -689,6 +790,9 @@ def upload_folder():
         if Path(filename).suffix.lower() in banned_exts:
             errors.append(f'{filename}: This file extension is blocked.')
             continue
+        # Encrypted batches store neutral object names: a password-less caller
+        # must not learn filenames from storage URLs or upstream headers.
+        storage_name = f'file-{stored_index}.bin' if is_encrypted else filename
         try:
             file.stream.seek(0, 2)
             size = file.stream.tell()
@@ -698,7 +802,7 @@ def upload_folder():
                 continue
             if size <= vercel_limit:
                 with requests.put(BLOB_API + '/',
-                                  params={'pathname': f'shares/{secrets.token_hex(16)}/{filename}'},
+                                  params={'pathname': f'shares/{secrets.token_hex(16)}/{storage_name}'},
                                   data=file.stream if size else b'', headers={
                                       **blob_headers(), 'Content-Length': str(size),
                                       'Content-Type': 'application/octet-stream',
@@ -713,11 +817,12 @@ def upload_folder():
                     link = checked_blob_url(result.get('url'))
                     blobs_to_clean.append(link)
                     file_list.append({'name': filename, 'url': link, 'size': size, 'provider': 'vercel'})
+                    stored_index += 1
             else:
                 if proxy_url:
                     body = MultipartEncoder(fields={
                         'time': expiry,
-                        'fileToUpload': (filename, file.stream, 'application/octet-stream'),
+                        'fileToUpload': (storage_name, file.stream, 'application/octet-stream'),
                     })
                     with requests.post(
                         proxy_url.rstrip('/') + '/proxy/litterbox', data=body,
@@ -731,7 +836,7 @@ def upload_folder():
                 else:
                     body = MultipartEncoder(fields={
                         'reqtype': 'fileupload', 'time': expiry,
-                        'fileToUpload': (filename, file.stream, 'application/octet-stream'),
+                        'fileToUpload': (storage_name, file.stream, 'application/octet-stream'),
                     })
                     with requests.post(
                         'https://litterbox.catbox.moe/resources/internals/api.php', data=body,
@@ -742,18 +847,47 @@ def upload_folder():
                 if not re.fullmatch(r'https://litter\.catbox\.moe/[A-Za-z0-9][A-Za-z0-9._-]*', link):
                     raise ValueError('Invalid storage link.')
                 file_list.append({'name': filename, 'url': link, 'size': size, 'provider': 'litterbox'})
+                stored_index += 1
         except (requests.RequestException, ValueError, OSError) as exc:
             errors.append(f'{filename}: Upload failed ({type(exc).__name__}).')
             continue
+    if is_encrypted and errors:
+        # All-or-nothing: the recipient's manifest is positional (index i in the
+        # manifest decrypts file i), so a partially rejected batch would desync
+        # names/IVs from stored files. Abort with no share and drop stored blobs.
+        if blobs_to_clean:
+            try:
+                delete_blobs(blobs_to_clean)
+            except (requests.RequestException, ValueError) as exc:
+                # Log only the failure class and object count: never URLs,
+                # filenames or anything derived from the password.
+                logger.warning('Encrypted batch blob cleanup deferred (%s); %d object(s) remain private until deleted.',
+                               type(exc).__name__, len(blobs_to_clean))
+        detail = '; '.join(errors[:3])
+        return error_response(detail, 400)
     if not file_list:
         detail = '; '.join(errors[:3]) if errors else 'No files were uploaded successfully.'
         return error_response(detail, 400)
     total_size = sum(f['size'] for f in file_list)
     folder_name = f'{len(file_list)} file' + ('s' if len(file_list) != 1 else '')
-    content_json = json.dumps(file_list)
+    if is_encrypted:
+        # EFM1 envelope: authenticated manifest + plaintext serving table (names,
+        # sizes, providers, URLs) that only the password holder can interpret.
+        content_json = json.dumps({
+            'enc': 1,
+            'v': 1,
+            'kdf': {'name': 'PBKDF2', 'iterations': 100000, 'hash': 'SHA-256'},
+            'cipher': 'AES-GCM',
+            'manifest': {'iv': iv_val, 'data': manifest},
+            'files': file_list,
+        })
+        shared_kwargs = {'salt': salt, 'iv': iv_val, 'is_encrypted': True}
+    else:
+        content_json = json.dumps(file_list)
+        shared_kwargs = {}
     try:
         shared = save_share('folder', folder_name, total_size, expires, content=content_json,
-                            custom_key=custom_key, provider='vercel')
+                            custom_key=custom_key, provider='vercel', **shared_kwargs)
         if shared is None:
             if blobs_to_clean:
                 try:
@@ -939,7 +1073,11 @@ def download_share(key):
         output = BytesIO()
         image.save(output)
         return Response(output.getvalue(), mimetype='image/svg+xml')
-    return render_template('download.html', share=share_details(row))
+    try:
+        share = share_details(row, page=True)
+    except ValueError:
+        return error_response('Folder data is corrupt.', 500)
+    return render_template('download.html', share=share)
 
 
 @app.route('/bulk-download', methods=['POST'])
@@ -991,6 +1129,20 @@ def bulk_download():
                     headers={'Content-Disposition': f'attachment; filename="alienxfile-{found}-files.zip"'})
 
 
+def folder_file_entries(row):
+    """Stored file table for a folder share: plain list, or the EFM1 wrapper's
+    `files` table for an encrypted share. Raises ValueError when corrupt."""
+    try:
+        parsed = json.loads(row['content'])
+    except (json.JSONDecodeError, TypeError):
+        raise ValueError('Folder data is corrupt.')
+    is_enc = row['is_encrypted'] if 'is_encrypted' in row.keys() else 0
+    entries = (parsed.get('files') if isinstance(parsed, dict) else None) if is_enc else parsed
+    if not isinstance(entries, list) or not all(isinstance(entry, dict) for entry in entries):
+        raise ValueError('Folder data is corrupt.')
+    return entries
+
+
 @app.route('/download-folder/<key>/<int:index>')
 def download_folder_file(key, index):
     """Stream a single file from a folder share by index."""
@@ -1004,12 +1156,16 @@ def download_folder_file(key, index):
         cleanup_expired(db)
         return error_response('This share has expired.', 410)
     try:
-        files = json.loads(row['content'])
-    except (json.JSONDecodeError, TypeError):
+        files = folder_file_entries(row)
+    except ValueError:
         return error_response('Folder data is corrupt.', 500)
     if index < 0 or index >= len(files):
         return error_response('Invalid file index.', 404)
     file_info = files[index]
+    is_enc = row['is_encrypted'] if 'is_encrypted' in row.keys() else 0
+    # Encrypted shares hand out ciphertext; never advertise the stored filename
+    # in headers a caller sees before unlocking.
+    download_name = f'file-{index}' if is_enc else (secure_filename(file_info.get('name', '')) or 'download')
     provider = file_info.get('provider', 'vercel')
     try:
         url = validated_storage_url(file_info.get('url'), provider)
@@ -1017,7 +1173,12 @@ def download_folder_file(key, index):
         return error_response('Invalid storage link.', 502)
     try:
         if provider == 'litterbox':
-            resp = requests.get(url, timeout=(10, 60), allow_redirects=False)
+            # Encrypted bytes are proxied (not redirected) so the browser can
+            # decrypt them same-origin without any cross-origin fetch.
+            if is_enc:
+                resp = requests.get(url, timeout=(10, 60), allow_redirects=False, stream=True)
+            else:
+                resp = requests.get(url, timeout=(10, 60), allow_redirects=False)
         else:
             resp = requests.get(url,
                                 headers={'Authorization': blob_headers()['Authorization'], 'Accept-Encoding': 'identity'},
@@ -1027,10 +1188,10 @@ def download_folder_file(key, index):
     if resp.status_code != 200:
         resp.close()
         return error_response('File is unavailable.', 502)
-    if provider == 'litterbox':
+    if provider == 'litterbox' and not is_enc:
         return redirect(url)
     response = Response(resp.iter_content(chunk_size=64 * 1024), content_type='application/octet-stream')
-    response.headers.set('Content-Disposition', 'attachment', filename=secure_filename(file_info['name']) or 'download')
+    response.headers.set('Content-Disposition', 'attachment', filename=download_name)
     response.headers['Content-Length'] = str(file_info.get('size', 0))
     response.call_on_close(resp.close)
     return response
@@ -1048,9 +1209,14 @@ def download_folder_zip(key):
     if row['expires'] <= time.time():
         cleanup_expired(db)
         return error_response('This share has expired.', 410)
+    if row['is_encrypted'] if 'is_encrypted' in row.keys() else 0:
+        # The server cannot decrypt: the recipient unlocks on the share page and
+        # the browser builds the archive from decrypted bytes.
+        return error_response('This share is password-protected. Open the share page, enter '
+                              'the password and download the files or the ZIP there.', 400)
     try:
-        files = json.loads(row['content'])
-    except (json.JSONDecodeError, TypeError):
+        files = folder_file_entries(row)
+    except ValueError:
         return error_response('Folder data is corrupt.', 500)
     zip_buf = BytesIO()
     found = 0
@@ -1082,6 +1248,110 @@ def download_folder_zip(key):
     response.headers.set('Content-Disposition', 'attachment',
                          filename=safe_share_name(row['name'], fallback='folder') + '.zip')
     return response
+
+
+@app.route('/download-folder-cipher/<key>')
+def download_folder_cipher(key):
+    """All ciphertext for an encrypted folder share in one framed response.
+
+    One request keeps the ZIP flow inside the shared lookup rate bucket instead
+    of one request per file. Frames are raw ciphertext; only the password holder
+    can decrypt them, and the manifest binding names/IVs stays authenticated.
+    """
+    if not re.fullmatch(r'[A-Za-z0-9]{3,20}', key):
+        return error_response('Invalid code.', 404)
+    db = get_db()
+    row = query(db, 'SELECT * FROM shares WHERE key = ?', (key,)).fetchone()
+    if not row or row['type'] != 'folder':
+        return error_response('Invalid folder share.', 404)
+    if row['expires'] <= time.time():
+        cleanup_expired(db)
+        return error_response('This share has expired.', 410)
+    if not (row['is_encrypted'] if 'is_encrypted' in row.keys() else 0):
+        return error_response('This share is not password-protected. Use Download All as ZIP.', 400)
+    try:
+        files = folder_file_entries(row)
+    except ValueError:
+        return error_response('Folder data is corrupt.', 500)
+    if not 1 <= len(files) <= 50:
+        return error_response('Folder data is corrupt.', 500)
+    if not _CIPHER_BUNDLE_SLOTS.acquire(blocking=False):
+        return error_response('Too many concurrent archive downloads. Try again shortly.', 429)
+    released = False
+
+    def release_slot():
+        nonlocal released
+        if not released:
+            released = True
+            _CIPHER_BUNDLE_SLOTS.release()
+
+    handed_off = False
+    try:
+        frames = []
+        frame_sizes = []
+        total_bytes = 0
+        for file_info in files:
+            provider = file_info.get('provider', 'vercel')
+            try:
+                url = validated_storage_url(file_info.get('url'), provider)
+                if provider == 'litterbox':
+                    resp = requests.get(url, timeout=(10, 60), allow_redirects=False, stream=True)
+                else:
+                    resp = requests.get(url,
+                                        headers={'Authorization': blob_headers()['Authorization'],
+                                                 'Accept-Encoding': 'identity'},
+                                        stream=True, timeout=(10, 60), allow_redirects=False)
+            except (requests.RequestException, ValueError):
+                return error_response('File storage is temporarily unavailable.', 502)
+            if resp.status_code != 200:
+                resp.close()
+                return error_response('File is unavailable.', 502)
+            # Stream with a running total: never buffer more than the archive
+            # limit before deciding the share is too large. Chunks are kept
+            # as-is (no join) so the response can yield them without a second
+            # full copy.
+            parts = []
+            frame_size = 0
+            too_large = False
+            try:
+                for chunk in resp.iter_content(chunk_size=65536):
+                    total_bytes += len(chunk)
+                    if total_bytes > MAX_ZIP_TOTAL_BYTES:
+                        too_large = True
+                        break
+                    parts.append(chunk)
+                    frame_size += len(chunk)
+            finally:
+                resp.close()
+            if too_large:
+                return error_response('This share is too large to download in one archive. '
+                                      'Download the files individually.', 400)
+            frames.append(parts)
+            frame_sizes.append(frame_size)
+        # Same bytes on the wire as the old single-buffer build (magic + count +
+        # length-prefixed frames), but yielded straight from the fetched chunks:
+        # no bytearray growth copies and no final bytes() copy of the bundle.
+        body_size = 9 + sum(4 + size for size in frame_sizes)
+
+        def stream_bundle():
+            try:
+                yield CIPHER_BUNDLE_MAGIC
+                yield len(frames).to_bytes(4, 'little')
+                for parts, size in zip(frames, frame_sizes):
+                    yield size.to_bytes(4, 'little')
+                    for chunk in parts:
+                        yield chunk
+            finally:
+                release_slot()
+
+        response = Response(_BundleStream(stream_bundle(), release_slot),
+                            content_type='application/octet-stream',
+                            headers={'Content-Length': str(body_size), 'Cache-Control': 'no-store'})
+        handed_off = True
+        return response
+    finally:
+        if not handed_off:
+            release_slot()
 
 
 @app.route('/api/url-meta', methods=['POST'])

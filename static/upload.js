@@ -85,6 +85,9 @@ const customKeyInput = document.getElementById("customCode");
 // FEATURE 6: Password-protected shares (uses existing #sharePassword from HTML)
 // ══════════════════════════════════════════════════════════════════════════════
 const passwordInput = document.getElementById("sharePassword");
+passwordInput.addEventListener("input", () => {
+    syncPasswordState();
+});
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Advanced option: upload each file with a separate code (default OFF).
@@ -151,6 +154,33 @@ async function encryptFileContent(password, file) {
     const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, arrayBuf);
     const encryptedBlob = new Blob([encrypted], { type: "application/octet-stream" });
     return { encryptedBlob, salt: bufToBase64(salt), iv: bufToBase64(iv) };
+}
+
+// EFM1: one share key for a whole batch. Every file is encrypted BEFORE the
+// multipart request is built, so a failure aborts with nothing on the wire.
+async function encryptFolderBatch(password, files) {
+    if (!hasCrypto) throw new Error("Password encryption requires a secure context (HTTPS).");
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const key = await deriveKeyFromPassword(password, salt);
+    const blobs = [];
+    const entries = [];
+    for (const file of files) {
+        const iv = crypto.getRandomValues(new Uint8Array(12));
+        const encrypted = await crypto.subtle.encrypt(
+            { name: "AES-GCM", iv }, key, await file.arrayBuffer());
+        blobs.push(new Blob([encrypted], { type: "application/octet-stream" }));
+        entries.push({ name: file.name, size: file.size, iv: bufToBase64(iv) });
+    }
+    const manifestIv = crypto.getRandomValues(new Uint8Array(12));
+    const manifestJson = new TextEncoder().encode(JSON.stringify({ v: 1, files: entries }));
+    const manifestData = await crypto.subtle.encrypt(
+        { name: "AES-GCM", iv: manifestIv }, key, manifestJson);
+    return {
+        blobs,
+        salt: bufToBase64(salt),
+        manifestIv: bufToBase64(manifestIv),
+        manifest: bufToBase64(manifestData),
+    };
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -267,25 +297,22 @@ textInput.addEventListener("input", () => {
 // One share per batch: a folder or multi-file File-tab selection is posted once
 // to /upload-folder and becomes a single code with an on-demand ZIP.
 const MAX_BATCH_FILES = 50;
-
-function passwordBlockedReason() {
-    const mode = form.elements.mode.value;
-    if (mode === "folder") return "Password protection is not available for folder shares.";
-    if (mode === "file" && fileInput.files.length > 1) {
-        return "Password protection is not available for multi-file shares. Select exactly one file to use a password.";
-    }
-    return "";
-}
+// Password-protected batches hold ciphertext (and later plaintext) in browser
+// memory because WebCrypto cannot stream. These guard that memory, not the
+// server's upload limits: plaintext batches are unaffected.
+const ENCRYPTED_BATCH_MAX_BYTES = 500000000;
+const ENCRYPTED_BATCH_WARN_BYTES = 200000000;
 
 function syncPasswordState() {
-    const reason = passwordBlockedReason();
-    passwordInput.disabled = Boolean(reason);
-    if (reason) passwordInput.value = "";
     const note = document.getElementById("passwordNotice");
-    if (note) {
-        note.textContent = reason;
-        note.hidden = !reason;
-    }
+    if (!note) return;
+    const mode = form.elements.mode.value;
+    const batchMode = mode === "folder" || (mode === "file" && fileInput.files.length > 1);
+    const show = Boolean(passwordInput.value) && batchMode;
+    note.hidden = !show;
+    note.textContent = show
+        ? "Every file in this batch is encrypted in your browser before upload, and stays encrypted until the recipient enters the password. Batches over 200 MB total are held in browser memory and may be slow."
+        : "";
 }
 
 function switchMode() {
@@ -546,7 +573,9 @@ function renderUpload(upload, batch) {
     const links = document.createElement("div");
     links.className = "result-links";
     const batchFiles = Array.isArray(upload.files) ? upload.files : [];
-    if (upload.type === "folder" && batchFiles.length > 1) {
+    // The server cannot build a ZIP for a password-protected share; the
+    // recipient unlocks on the share page and the browser builds it there.
+    if (upload.type === "folder" && batchFiles.length > 1 && !upload.is_encrypted) {
         const zipLink = document.createElement("a");
         zipLink.className = "bulk-download-btn";
         zipLink.href = `/download-folder-zip/${upload.key}`;
@@ -734,10 +763,6 @@ form.addEventListener("submit", async event => {
         status.textContent = `Select at most ${MAX_BATCH_FILES} files to share under one code.`;
         return;
     }
-    if (password && passwordBlockedReason()) {
-        status.textContent = passwordBlockedReason();
-        return;
-    }
     busy = true;
     cancelled = false;
     controls.disabled = true;
@@ -763,10 +788,44 @@ form.addEventListener("submit", async event => {
     };
     try {
         if (useFolderBatch) {
+            const encrypting = Boolean(password);
+            if (encrypting) {
+                // An encrypted batch is all-or-nothing (the recipient's manifest
+                // maps positionally), so validate everything before encrypting
+                // and before a single byte leaves the browser.
+                for (const file of queue) {
+                    const validationError = fileError(file, getStorageProvider(file));
+                    if (validationError) addError(`${file.name}: ${validationError}`);
+                }
+                if (failures) return;
+                const totalBytes = queue.reduce((sum, file) => sum + file.size, 0);
+                if (totalBytes > ENCRYPTED_BATCH_MAX_BYTES) {
+                    addError(`Password-protected batches are limited to ${formatSize(ENCRYPTED_BATCH_MAX_BYTES)} total so the browser can hold the encrypted data. Remove the password or share fewer or smaller files.`);
+                    return;
+                }
+                if (totalBytes > ENCRYPTED_BATCH_WARN_BYTES) {
+                    status.textContent = `Encrypting ${queue.length} files (${formatSize(totalBytes)}) in browser memory. Large password-protected batches can be slow or fail on this device.`;
+                }
+            }
             const data = new FormData();
             data.append("expire", expire);
             if (customKey) data.append("customKey", customKey);
-            for (const file of queue) data.append("file", file, file.name);
+            if (encrypting) {
+                let encrypted;
+                try {
+                    encrypted = await encryptFolderBatch(password, queue);
+                } catch (error) {
+                    addError(`Encryption failed before upload: ${error && error.message ? error.message : error}`);
+                    return;
+                }
+                queue.forEach((file, index) => data.append("file", encrypted.blobs[index], file.name));
+                data.append("isEncrypted", "1");
+                data.append("salt", encrypted.salt);
+                data.append("iv", encrypted.manifestIv);
+                data.append("manifest", encrypted.manifest);
+            } else {
+                for (const file of queue) data.append("file", file, file.name);
+            }
             progress.value = 0;
             status.textContent = `Uploading ${queue.length} files as one share...`;
             let xhr;

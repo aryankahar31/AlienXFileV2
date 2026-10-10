@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+import base64
 import ipaddress
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, closing
@@ -27,7 +28,7 @@ import requests
 from flask import render_template, request
 from requests_toolbelt.multipart.encoder import MultipartEncoder
 
-from flask_app import app, get_db, save_share, _preview_category
+from flask_app import app, get_db, save_share, _preview_category, download_folder_cipher
 
 
 FILE_URL = 'https://litter.catbox.moe/abc123.txt'
@@ -1677,20 +1678,655 @@ with patch('flask_app.time.time', return_value=float(sys.argv[2])), patch(
             mock_get.assert_not_called()
         self.assertEqual(preview.status_code, 400)
 
-    def test_batch_upload_refuses_password_flag_and_creates_no_share(self):
-        with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN):
+    def efm1_fields(self, **overrides):
+        """Valid EFM1 form fields: 16-byte salt, 12-byte manifest IV, >=32-byte
+        manifest ciphertext (structure only - the server cannot verify it)."""
+        fields = {
+            'isEncrypted': '1',
+            'salt': base64.b64encode(bytes(range(16))).decode(),
+            'iv': base64.b64encode(bytes(range(12, 24))).decode(),
+            'manifest': base64.b64encode(b'M' * 64).decode(),
+        }
+        fields.update(overrides)
+        return fields
+
+    def test_encrypted_batch_upload_validates_parameters_before_any_storage(self):
+        valid = self.efm1_fields()
+        missing_manifest = dict(valid)
+        missing_manifest.pop('manifest')
+        cases = [
+            ({'isEncrypted': '1'}, 'Encryption parameters missing.'),
+            ({'salt': valid['salt']}, 'Encryption parameters provided without the isEncrypted flag.'),
+            ({'iv': valid['iv'], 'manifest': valid['manifest']},
+             'Encryption parameters provided without the isEncrypted flag.'),
+            (missing_manifest, 'Encryption parameters missing.'),
+            (self.efm1_fields(salt='%%%not-base64%%%'), 'Encryption parameters must be valid base64.'),
+            (self.efm1_fields(salt=base64.b64encode(b'short').decode()),
+             'Encryption salt must be 16 bytes.'),
+            (self.efm1_fields(iv=base64.b64encode(b'0123456789a').decode()),
+             'Encryption IV must be 12 bytes.'),
+            (self.efm1_fields(manifest=base64.b64encode(b'tiny').decode()),
+             'Encryption manifest is invalid.'),
+            (self.efm1_fields(salt=base64.b64encode(b'x' * 32).decode()),
+             'Encryption parameters are too long.'),
+            (self.efm1_fields(manifest='A' * (((131072 + 2) // 3) * 4 + 8)),
+             'Encryption parameters are too long.'),
+        ]
+        files = [(b'one', 'a.txt'), (b'two', 'b.txt')]
+        for fields, message in cases:
+            with self.subTest(error=message):
+                payload = [(BytesIO(body), name) for body, name in files]
+                with patch('flask_app.requests.put') as put:
+                    response = self.client.post('/upload-folder', data={
+                        'expire': '1h', **fields, 'file': payload,
+                    })
+                self.assertEqual(response.status_code, 400, response.get_data(as_text=True))
+                body = response.get_json()
+                self.assertFalse(body['success'])
+                self.assertEqual(body['uploads'], [])
+                self.assertEqual(body['error'], message)
+                # Validation runs before any storage call or database write.
+                put.assert_not_called()
+                with app.app_context():
+                    count = get_db().execute('SELECT COUNT(*) FROM shares').fetchone()[0]
+                self.assertEqual(count, 0)
+                self.post.assert_not_called()
+
+    def test_encrypted_batch_upload_creates_authenticated_share_without_leaks(self):
+        fields = self.efm1_fields()
+        files = [('secret one.txt', b'AAAA-cipher'), ('nested/secret two.bin', b'BB-cipher')]
+        urls = ['https://teststore.private.blob.vercel-storage.com/shares/'
+                f'{index:032x}/blob{index}' for index in range(len(files))]
+        with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN), \
+                patch('flask_app.requests.put') as put:
+            put.return_value.__enter__.return_value.status_code = 200
+            put.return_value.__enter__.return_value.json.side_effect = [
+                {'url': url} for url in urls]
             response = self.client.post('/upload-folder', data={
-                'expire': '1h', 'isEncrypted': '1',
-                'file': [(BytesIO(b'one'), 'a.txt'), (BytesIO(b'two'), 'b.txt')],
+                'expire': '1h', **fields,
+                'file': [(BytesIO(body), name) for name, body in files],
             })
-        self.assertEqual(response.status_code, 400)
-        body = response.get_json()
-        self.assertFalse(body['success'])
-        self.assertEqual(body['uploads'], [])
-        self.assertIn('Password protection is not supported', body['error'])
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        result = response.get_json()
+        self.assertTrue(result['success'])
+        self.assertEqual(result['errors'], [])
+        share, = result['uploads']
+        self.assertEqual(share['type'], 'folder')
+        self.assertEqual(share['name'], '2 files')
+        self.assertTrue(share['is_encrypted'])
+        # The sender's own result panel keeps the real (sanitized) names.
+        self.assertEqual([f['name'] for f in share['files']],
+                         ['secret_one.txt', 'nested_secret_two.bin'])
+        # Encrypted batches store neutral object names: storage paths never
+        # echo a filename a password-less caller could read.
+        pathnames = [call.kwargs['params']['pathname'] for call in put.call_args_list]
+        self.assertEqual([p.rsplit('/', 1)[-1] for p in pathnames],
+                         ['file-0.bin', 'file-1.bin'])
+        for pathname in pathnames:
+            self.assertNotIn('secret', pathname)
+        # EFM1 envelope in the row: authenticated manifest + serving table.
         with app.app_context():
-            self.assertEqual(get_db().execute('SELECT COUNT(*) FROM shares').fetchone()[0], 0)
-        self.post.assert_not_called()
+            row = get_db().execute('SELECT * FROM shares WHERE key = ?',
+                                   (share['key'],)).fetchone()
+        self.assertEqual(row['is_encrypted'], 1)
+        self.assertEqual(row['salt'], fields['salt'])
+        self.assertEqual(row['iv'], fields['iv'])
+        content = json.loads(row['content'])
+        self.assertEqual(content['enc'], 1)
+        self.assertEqual(content['v'], 1)
+        self.assertEqual(content['cipher'], 'AES-GCM')
+        self.assertEqual(content['kdf'], {'name': 'PBKDF2', 'iterations': 100000,
+                                          'hash': 'SHA-256'})
+        self.assertEqual(content['manifest'], {'iv': fields['iv'], 'data': fields['manifest']})
+        self.assertEqual([f['name'] for f in content['files']],
+                         ['secret_one.txt', 'nested_secret_two.bin'])
+        # The page carries only ciphertext: manifest blob, count, salt, IV and
+        # the neutral download endpoints - never names or storage URLs.
+        page = self.client.get(f'/share/{share["key"]}')
+        self.assertEqual(page.status_code, 200)
+        html = page.get_data(as_text=True)
+        self.assertIn('password-prompt', html)
+        self.assertIn(f'data-manifest="{fields["manifest"]}"', html)
+        self.assertIn(f'data-iv="{fields["iv"]}"', html)
+        self.assertIn(f'data-salt="{fields["salt"]}"', html)
+        self.assertIn('data-count="2"', html)
+        self.assertIn(f'data-folder-base="/download-folder/{share["key"]}/0"', html)
+        self.assertIn(f'data-folder-bundle="/download-folder-cipher/{share["key"]}"', html)
+        self.assertNotIn('secret', html)
+        self.assertNotIn('teststore.private.blob.vercel-storage.com', html)
+        self.assertNotIn('Download All as ZIP', html)
+        self.assertNotIn(f'href="/download-folder/{share["key"]}/', html)
+        # The preview endpoint never fetches storage for a folder share at all.
+        with patch('flask_app.requests.get') as mock_get:
+            preview = self.client.get(f'/api/preview/{share["key"]}')
+            mock_get.assert_not_called()
+        self.assertEqual(preview.status_code, 404)
+
+    def test_encrypted_batch_upload_is_all_or_nothing_on_any_failure(self):
+        fields = self.efm1_fields()
+        # One accepted file plus one banned extension: the batch must abort,
+        # drop the already-stored blob and create no share at all.
+        with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN), \
+                patch('flask_app.requests.put') as put, \
+                patch('flask_app.delete_blobs') as delete:
+            put.return_value.__enter__.return_value.status_code = 200
+            put.return_value.__enter__.return_value.json.return_value = {'url': BLOB_URL}
+            response = self.client.post('/upload-folder', data={
+                'expire': '1h', **fields,
+                'file': [(BytesIO(b'ok'), 'a.txt'), (BytesIO(b'bad'), 'evil.exe')],
+            })
+        self.assertEqual(response.status_code, 400, response.get_data(as_text=True))
+        self.assertIn('evil.exe: This file extension is blocked.',
+                      response.get_json()['error'])
+        self.assertEqual(response.get_json()['uploads'], [])
+        self.assertEqual(put.call_count, 1)
+        delete.assert_called_once_with([BLOB_URL])
+        with app.app_context():
+            count = get_db().execute('SELECT COUNT(*) FROM shares').fetchone()[0]
+        self.assertEqual(count, 0)
+        # Share-creation failure (custom code taken) also cleans up the blobs.
+        self.insert_share('taken1', 'existing.txt')
+        with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN), \
+                patch('flask_app.requests.put') as put, \
+                patch('flask_app.delete_blobs') as delete:
+            put.return_value.__enter__.return_value.status_code = 200
+            put.return_value.__enter__.return_value.json.return_value = {'url': BLOB_URL}
+            response = self.client.post('/upload-folder', data={
+                'expire': '1h', 'customKey': 'taken1', **fields,
+                'file': [(BytesIO(b'ok'), 'a.txt')],
+            })
+        self.assertEqual(response.status_code, 409, response.get_data(as_text=True))
+        delete.assert_called_once_with([BLOB_URL])
+        with app.app_context():
+            count = get_db().execute('SELECT COUNT(*) FROM shares').fetchone()[0]
+        self.assertEqual(count, 1)
+        # A cleanup failure is logged without secrets and still creates no share.
+        with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN), \
+                patch('flask_app.requests.put') as put, \
+                patch('flask_app.delete_blobs',
+                      side_effect=requests.HTTPError('Private storage cleanup failed.')):
+            put.return_value.__enter__.return_value.status_code = 200
+            put.return_value.__enter__.return_value.json.return_value = {'url': BLOB_URL}
+            with self.assertLogs('flask_app', level='WARNING') as logged:
+                response = self.client.post('/upload-folder', data={
+                    'expire': '1h', **fields,
+                    'file': [(BytesIO(b'ok'), 'a.txt'), (BytesIO(b'bad'), 'evil.exe')],
+                })
+        self.assertEqual(response.status_code, 400, response.get_data(as_text=True))
+        warning = '\n'.join(logged.output)
+        self.assertIn('Encrypted batch blob cleanup deferred (HTTPError); 1 object(s)', warning)
+        self.assertNotIn(BLOB_URL, warning)
+        self.assertNotIn('private.blob', warning)
+        self.assertNotIn('evil.exe', warning)
+        with app.app_context():
+            count = get_db().execute(
+                "SELECT COUNT(*) FROM shares WHERE name LIKE '%files%'").fetchone()[0]
+        self.assertEqual(count, 0)
+
+    def insert_encrypted_folder(self, key, files, expires=None, content=None):
+        """Encrypted folder row with the EFM1 envelope. `files` is the stored
+        serving table (names/URLs the server fetches but never explains)."""
+        salt = base64.b64encode(bytes(range(16))).decode()
+        iv = base64.b64encode(bytes(range(12, 24))).decode()
+        manifest = base64.b64encode(b'M' * 64).decode()
+        body = content if content is not None else json.dumps({
+            'enc': 1, 'v': 1,
+            'kdf': {'name': 'PBKDF2', 'iterations': 100000, 'hash': 'SHA-256'},
+            'cipher': 'AES-GCM',
+            'manifest': {'iv': iv, 'data': manifest},
+            'files': files,
+        })
+        with app.app_context():
+            db = get_db()
+            with db:
+                db.execute('''INSERT INTO shares (key, type, name, content, url, size, expires,
+                                                  provider, salt, iv, is_encrypted)
+                              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                           (key, 'folder', f'{len(files)} files', body, None, 0,
+                            expires or (self.now + 3600), None, salt, iv, 1))
+        return {'salt': salt, 'iv': iv, 'manifest': manifest}
+
+    def test_encrypted_folder_routes_serve_ciphertext_only(self):
+        ciphertext = [b'ENCRYPTED-ONE-0123456789', b'ENCRYPTED-TWO-9876543210']
+        files = [
+            {'name': 'alpha secret.txt', 'url': FILE_URL, 'provider': 'litterbox',
+             'size': len(ciphertext[0])},
+            {'name': 'beta secret.bin', 'url': FILE_URL + 'x', 'provider': 'litterbox',
+             'size': len(ciphertext[1])},
+        ]
+        meta = self.insert_encrypted_folder('63001', files)
+        # A single file streams ciphertext proxied (never a redirect) under a
+        # neutral name that leaks nothing about the stored filename.
+        with patch('flask_app.requests.get') as mock_get:
+            mock_get.side_effect = [self.file_response(body) for body in ciphertext]
+            single = self.client.get('/download-folder/63001/0')
+        self.assertEqual(single.status_code, 200, single.get_data(as_text=True))
+        self.assertEqual(single.data, ciphertext[0])
+        disposition = single.headers['Content-Disposition']
+        self.assertIn('attachment', disposition)
+        self.assertIn('file-0', disposition)
+        self.assertNotIn('alpha', disposition)
+        self.assertNotIn('secret', disposition)
+        self.assertTrue(mock_get.call_args.kwargs.get('allow_redirects') is False)
+        out_of_range = self.client.get('/download-folder/63001/2')
+        self.assertEqual(out_of_range.status_code, 404)
+        # The server refuses to build an archive it cannot decrypt.
+        with patch('flask_app.requests.get') as mock_get:
+            zip_response = self.client.get('/download-folder-zip/63001')
+        self.assertEqual(zip_response.status_code, 400)
+        self.assertIn('password-protected', zip_response.get_data(as_text=True))
+        mock_get.assert_not_called()
+        # One framed bundle: magic + count + (length-prefixed) ciphertext frames.
+        with patch('flask_app.requests.get') as mock_get:
+            mock_get.side_effect = [self.file_response(body) for body in ciphertext]
+            bundle = self.client.get('/download-folder-cipher/63001')
+        self.assertEqual(bundle.status_code, 200, bundle.get_data(as_text=True))
+        self.assertEqual(bundle.headers['Cache-Control'], 'no-store')
+        body = bundle.data
+        self.assertEqual(body[:5], b'AXFC1')
+        count = int.from_bytes(body[5:9], 'little')
+        self.assertEqual(count, 2)
+        offset = 9
+        frames = []
+        for _ in range(count):
+            length = int.from_bytes(body[offset:offset + 4], 'little')
+            offset += 4
+            frames.append(body[offset:offset + length])
+            offset += length
+        self.assertEqual(offset, len(body))
+        self.assertEqual(frames, ciphertext)
+        self.assertEqual(int(bundle.headers['Content-Length']), len(body))
+        # Names, manifest and count stay server-side only.
+        self.assertNotIn(b'alpha', body)
+        self.assertNotIn(meta['manifest'].encode(), body)
+        # A plaintext folder never uses the cipher route.
+        self.insert_folder('63002', '1 file',
+                           [{'name': 'plain.txt', 'url': FILE_URL,
+                             'provider': 'litterbox', 'size': 1}])
+        with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN):
+            plain_bundle = self.client.get('/download-folder-cipher/63002')
+        self.assertEqual(plain_bundle.status_code, 400)
+        self.assertIn('not password-protected', plain_bundle.get_data(as_text=True))
+
+    def test_folder_cipher_shares_the_lookup_rate_bucket(self):
+        files = [{'name': 'a.txt', 'url': FILE_URL, 'provider': 'litterbox', 'size': 1}]
+        self.insert_encrypted_folder('63010', files)
+        with patch.dict(app.config, LOOKUP_RATE_LIMIT=3), \
+                patch('flask_app.requests.get') as mock_get:
+            mock_get.return_value = self.file_response(b'ENCRYPTED-ONE-0123456789')
+            responses = [self.client.get('/download-folder-cipher/63010'),
+                         self.client.get('/download-folder/63010/0'),
+                         self.client.get('/download-folder-zip/63010'),
+                         self.client.get('/download-folder-cipher/63010')]
+            statuses = [response.status_code for response in responses]
+            # Closing releases the one-at-a-time bundle slot the cipher
+            # responses acquired; tests must not leak it to each other.
+            for response in responses:
+                response.close()
+        # The first three consume the shared lookup allowance; the fourth is 429.
+        self.assertEqual(statuses, [200, 200, 400, 429])
+
+    def test_cipher_bundle_streams_byte_identical_frames(self):
+        """The bundle is served as a generator of the already-fetched chunks:
+        byte-identical wire format and Content-Length, but the view never
+        materializes the whole bundle as one bytes/bytearray object. The second
+        frame is >64 KB so multi-chunk frames are covered too."""
+        ciphertext = [b'ENCRYPTED-ONE-0123456789',
+                      bytes(range(256)) * 274]  # 70_144 bytes: 64 KB + rest
+        files = [{'name': f'f{i}.bin', 'url': f'{FILE_URL}{i}',
+                  'provider': 'litterbox', 'size': len(body)}
+                 for i, body in enumerate(ciphertext)]
+        self.insert_encrypted_folder('63015', files)
+        expected = b'AXFC1' + (2).to_bytes(4, 'little')
+        for frame in ciphertext:
+            expected += len(frame).to_bytes(4, 'little') + frame
+        with patch('flask_app.requests.get') as mock_get:
+            mock_get.side_effect = [self.file_response(body) for body in ciphertext]
+            response = self.client.get('/download-folder-cipher/63015')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, expected)
+        self.assertEqual(int(response.headers['Content-Length']), len(expected))
+        self.assertEqual(response.headers['Cache-Control'], 'no-store')
+        self.assertEqual(response.headers['Content-Type'], 'application/octet-stream')
+        # Direct view call: WSGI receives a generator over the fetched chunks,
+        # not a prebuilt buffer (the old implementation passed bytes here).
+        with patch('flask_app.requests.get') as mock_get:
+            mock_get.side_effect = [self.file_response(body) for body in ciphertext]
+            with app.test_request_context('/download-folder-cipher/63015'):
+                view_response = download_folder_cipher('63015')
+        self.assertTrue(view_response.is_streamed)
+        self.assertNotIsInstance(view_response.response, (bytes, bytearray))
+        self.assertEqual(b''.join(view_response.response), expected)
+
+    def test_cipher_bundle_rejects_a_second_concurrent_build(self):
+        """The route builds at most one retained bundle at a time (Render Free
+        is 512 MB). A second overlapping request gets 429 before touching
+        storage; closing the first response releases the slot."""
+        ciphertext = [b'ENCRYPTED-ONE-0123456789']
+        files = [{'name': 'a.bin', 'url': FILE_URL, 'provider': 'litterbox',
+                  'size': len(ciphertext[0])}]
+        self.insert_encrypted_folder('63040', files)
+        with patch('flask_app.requests.get') as mock_get:
+            mock_get.side_effect = [self.file_response(ciphertext[0])]
+            first = self.client.get('/download-folder-cipher/63040')
+            self.assertEqual(first.status_code, 200)
+            # The first body is not yet consumed, so its build slot is held.
+            second = self.client.get('/download-folder-cipher/63040')
+            self.assertEqual(second.status_code, 429)
+            self.assertIn('Too many concurrent archive downloads',
+                          second.get_data(as_text=True))
+            mock_get.assert_called_once()
+            first.close()
+            mock_get.side_effect = [self.file_response(ciphertext[0])]
+            third = self.client.get('/download-folder-cipher/63040')
+            self.assertEqual(third.status_code, 200)
+            third.close()
+            self.assertEqual(mock_get.call_count, 2)
+
+    def test_corrupt_encrypted_folder_content_returns_500_without_leaks(self):
+        self.insert_encrypted_folder('63020', [], content='{not-json')
+        page = self.client.get('/share/63020')
+        self.assertEqual(page.status_code, 500, page.get_data(as_text=True))
+        html = page.get_data(as_text=True)
+        self.assertIn('Folder data is corrupt.', html)
+        self.assertNotIn('Traceback', html)
+        self.assertNotIn('sqlite3', html)
+
+    def test_encrypted_folder_page_client_contract(self):
+        source = (Path(__file__).with_name('templates') / 'download.html').read_text(
+            encoding='utf-8')
+        section = source[source.index('async function deriveShareKey'):
+                          source.index('// Feature 11: Markdown/text preview')]
+        # Pure DOM-text rendering only: names and decrypted bytes never hit HTML.
+        self.assertNotIn('innerHTML', section)
+        self.assertIn('nameEl.textContent = entry.name;', section)
+        # The folder branch unlocks the authenticated manifest before revealing
+        # a single name, then fetches ciphertext through the shared endpoints.
+        self.assertIn('unlockFolder(key, data.dataset.manifest, iv,', section)
+        self.assertIn('Number(data.dataset.count)', section)
+        self.assertIn('data.dataset.folderBase', section)
+        self.assertIn('data.dataset.folderBundle', section)
+        self.assertIn('downloadFolderEntry(key, keyBase, index, entry)', section)
+        self.assertIn('downloadFolderZip(key, bundleUrl, entries)', section)
+        self.assertIn('buildStoredZip(parts)', section)
+        # Template ships exactly the four folder attributes - no names, URLs or
+        # per-file IVs in the pre-unlock page.
+        self.assertIn('data-manifest="{{ share.manifest.data }}"', source)
+        self.assertIn('data-count="{{ share.count }}"', source)
+        self.assertIn("url_for('download_folder_file', key=share.key, index=0)", source)
+        self.assertIn("url_for('download_folder_cipher', key=share.key)", source)
+        self.assertNotIn('data-files', source)
+        self.assertNotIn('share.files }}', section)
+
+    def test_password_batch_client_contract_encrypts_before_upload(self):
+        js = self._upload_js()
+        self.assertIn('async function encryptFolderBatch(password, files)', js)
+        self.assertIn('encrypted = await encryptFolderBatch(password, queue);', js)
+        # Batch, text and single-file (separate-code) uploads all send the flag.
+        self.assertEqual(js.count('data.append("isEncrypted", "1");'), 3)
+        self.assertIn('data.append("salt", encrypted.salt);', js)
+        self.assertIn('data.append("iv", encrypted.manifestIv);', js)
+        self.assertIn('data.append("manifest", encrypted.manifest);', js)
+        # An encryption failure returns before the multipart request is built:
+        # no partially encrypted batch can ever reach the wire.
+        enc = js.index('await encryptFolderBatch(password, queue);')
+        xhr = js.index('uploadRequest(data, batchLabel, "/upload-folder")', enc)
+        failure_block = js[enc:xhr]
+        self.assertIn('Encryption failed before upload:', failure_block)
+        self.assertIn('return;', failure_block)
+        # Browser-memory guards for large password batches (hard cap + warning).
+        guard_block = js[js.index('const totalBytes = queue.reduce'):xhr]
+        self.assertIn('totalBytes > ENCRYPTED_BATCH_MAX_BYTES', guard_block)
+        self.assertIn('totalBytes > ENCRYPTED_BATCH_WARN_BYTES', guard_block)
+        self.assertIn('const ENCRYPTED_BATCH_MAX_BYTES = 500000000;', js)
+        self.assertIn('const ENCRYPTED_BATCH_WARN_BYTES = 200000000;', js)
+        # The password field was never silently disabled - only explained.
+        self.assertNotIn('passwordBlockedReason', js)
+        self.assertIn('encrypted in your browser before upload', js)
+        html = self.client.get('/').get_data(as_text=True)
+        self.assertIn('upload.js?v=9', html)
+        self.assertIn('<p class="notice" id="passwordNotice"', html)
+
+    @unittest.skipUnless(shutil.which('node'), 'node is required to run the EFM1 client scripts')
+    def test_efm1_cross_language_encrypt_upload_unlock_round_trip(self):
+        """The real browser scripts on both sides: node encrypts (upload.js
+        functions), Python serves (page + bundle endpoints), node unlocks
+        (download.html functions) and verifies tamper rejection."""
+        template = Path(__file__).with_name('templates') / 'download.html'
+        upload_js = Path(app.root_path) / 'static' / 'upload.js'
+        encrypt_script = (
+            "const fs = require('fs');\n"
+            "const src = fs.readFileSync(process.argv[1], 'utf8');\n"
+            "const start = src.indexOf('const hasCrypto');\n"
+            "const end = src.indexOf('document.addEventListener(\"paste\"');\n"
+            "if (start < 0 || end <= start) process.exit(2);\n"
+            "eval(src.slice(start, end));\n"
+            "(async () => {\n"
+            "  const password = 'correct horse battery staple';\n"
+            "  const specs = [\n"
+            "    { name: 'hello world.txt', text: 'Hello, EFM1!' },\n"
+            "    { name: 'nested/dir/ünïcode-façé.bin', text: 'second payload \\u2728' },\n"
+            "  ];\n"
+            "  const files = specs.map(s => ({\n"
+            "    name: s.name,\n"
+            "    size: new TextEncoder().encode(s.text).length,\n"
+            "    arrayBuffer: async () => {\n"
+            "      const b = new TextEncoder().encode(s.text);\n"
+            "      return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);\n"
+            "    },\n"
+            "  }));\n"
+            "  const out = await encryptFolderBatch(password, files);\n"
+            "  const blobs = [];\n"
+            "  for (const blob of out.blobs) {\n"
+            "    blobs.push(Buffer.from(await blob.arrayBuffer()).toString('base64'));\n"
+            "  }\n"
+            "  fs.writeFileSync(process.argv[2], JSON.stringify({\n"
+            "    password, salt: out.salt, iv: out.manifestIv, manifest: out.manifest,\n"
+            "    blobs, names: specs.map(s => s.name), texts: specs.map(s => s.text),\n"
+            "  }));\n"
+            "})().catch(e => { console.error(e && e.stack || e); process.exit(1); });\n"
+        )
+        verify_script = (
+            "const fs = require('fs');\n"
+            "const html = fs.readFileSync(process.argv[1], 'utf8');\n"
+            "const start = html.indexOf('async function deriveShareKey');\n"
+            "const end = html.indexOf(\"document.getElementById('unlockBtn')\");\n"
+            "if (start < 0 || end <= start) process.exit(2);\n"
+            "eval(html.slice(start, end));\n"
+            "const toBuf = b64 => Uint8Array.from(Buffer.from(b64, 'base64')).buffer;\n"
+            "const rejected = fn => fn().then(() => false, () => true);\n"
+            "(async () => {\n"
+            "  const input = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));\n"
+            "  const out = { names: [], texts: [] };\n"
+            "  const key = await deriveShareKey(input.password, input.salt);\n"
+            "  const entries = await unlockFolder(key, input.manifest, input.iv, input.count);\n"
+            "  out.names = entries.map(e => e.name);\n"
+            "  const frames = parseCipherBundle(toBuf(input.bundle), input.count);\n"
+            "  for (let i = 0; i < entries.length; i++) {\n"
+            "    out.texts.push(new TextDecoder().decode(\n"
+            "      await decryptFolderFrame(key, entries[i], frames[i])));\n"
+            "  }\n"
+            "  out.text0 = new TextDecoder().decode(await decryptFolderFrame(\n"
+            "    key, entries[0], Uint8Array.from(Buffer.from(input.frame0, 'base64'))));\n"
+            "  const badKey = await deriveShareKey('wrong password', input.salt);\n"
+            "  out.wrongPasswordRejected = await rejected(\n"
+            "    () => unlockFolder(badKey, input.manifest, input.iv, input.count));\n"
+            "  const manifestBytes = Buffer.from(input.manifest, 'base64');\n"
+            "  manifestBytes[Math.floor(manifestBytes.length / 2)] ^= 0xFF;\n"
+            "  out.tamperedManifestRejected = await rejected(\n"
+            "    () => unlockFolder(key, manifestBytes.toString('base64'), input.iv, input.count));\n"
+            "  out.countMismatchRejected = await rejected(\n"
+            "    () => unlockFolder(key, input.manifest, input.iv, input.count + 1));\n"
+            "  const bundleBytes = Buffer.from(input.bundle, 'base64');\n"
+            "  const flipped = Buffer.from(bundleBytes);\n"
+            "  flipped[9 + 4 + 5] ^= 0xFF;\n"
+            "  let tamperedFrame = false;\n"
+            "  try {\n"
+            "    const tampered = parseCipherBundle(Uint8Array.from(flipped).buffer, input.count);\n"
+            "    await decryptFolderFrame(key, entries[0], tampered[0]);\n"
+            "  } catch { tamperedFrame = true; }\n"
+            "  out.tamperedFrameRejected = tamperedFrame;\n"
+            "  const badMagic = Buffer.from(bundleBytes);\n"
+            "  badMagic[0] = 0x00;\n"
+            "  out.badMagicRejected = await rejected(\n"
+            "    async () => parseCipherBundle(Uint8Array.from(badMagic).buffer, input.count));\n"
+            "  out.truncatedRejected = await rejected(async () => parseCipherBundle(\n"
+            "    Uint8Array.from(bundleBytes.subarray(0, bundleBytes.length - 5)).buffer, input.count));\n"
+            "  const trailing = new Uint8Array(bundleBytes.length + 3);\n"
+            "  trailing.set(Uint8Array.from(bundleBytes));\n"
+            "  out.trailingDataRejected = await rejected(\n"
+            "    async () => parseCipherBundle(trailing.buffer, input.count));\n"
+            "  out.bundleCountMismatchRejected = await rejected(\n"
+            "    async () => parseCipherBundle(toBuf(input.bundle), input.count + 1));\n"
+            "  process.stdout.write(JSON.stringify(out));\n"
+            "})().catch(e => { console.error(e && e.stack || e); process.exit(1); });\n"
+        )
+        with tempfile.TemporaryDirectory(prefix='alienx-efm1-') as directory:
+            secret_path = Path(directory) / 'secret.json'
+            result = subprocess.run(
+                ['node', '-e', encrypt_script, str(upload_js), str(secret_path)],
+                capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            secret = json.loads(secret_path.read_text(encoding='utf-8'))
+            payload = [(BytesIO(base64.b64decode(blob)), name)
+                       for blob, name in zip(secret['blobs'], secret['names'])]
+            with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN), \
+                    patch('flask_app.requests.put') as put:
+                put.return_value.__enter__.return_value.status_code = 200
+                put.return_value.__enter__.return_value.json.side_effect = [
+                    {'url': 'https://teststore.private.blob.vercel-storage.com/shares/'
+                            f'{index:032x}/blob{index}'}
+                    for index in range(len(payload))]
+                response = self.client.post('/upload-folder', data={
+                    'expire': '1h', 'isEncrypted': '1', 'salt': secret['salt'],
+                    'iv': secret['iv'], 'manifest': secret['manifest'], 'file': payload,
+                })
+            self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+            share, = response.get_json()['uploads']
+            self.assertEqual(len(share['files']), 2)
+            # Stored/sender names are sanitized; originals live only inside the
+            # encrypted manifest the recipient unlocks.
+            for entry in share['files']:
+                self.assertNotIn('/', entry['name'])
+            html = self.client.get(f'/share/{share["key"]}').get_data(as_text=True)
+            for name in secret['names']:
+                self.assertNotIn(name, html)
+            self.assertNotIn('teststore.private.blob.vercel-storage.com', html)
+
+            def data_attr(name):
+                match = re.search(rf'data-{name}="([^"]*)"', html)
+                self.assertIsNotNone(match, f'missing data-{name}')
+                return match.group(1)
+
+            page_salt, page_iv = data_attr('salt'), data_attr('iv')
+            manifest_attr = data_attr('manifest')
+            count = int(data_attr('count'))
+            bundle_path = data_attr('folder-bundle')
+            base_path = data_attr('folder-base')
+            self.assertEqual(page_salt, secret['salt'])
+            self.assertEqual(page_iv, secret['iv'])
+            self.assertEqual(manifest_attr, secret['manifest'])
+            self.assertEqual(count, len(secret['blobs']))
+            self.assertEqual(bundle_path, f'/download-folder-cipher/{share["key"]}')
+            self.assertEqual(base_path, f'/download-folder/{share["key"]}/0')
+            with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN), \
+                    patch('flask_app.requests.get') as mock_get:
+                mock_get.side_effect = [self.file_response(base64.b64decode(blob))
+                                        for blob in secret['blobs']]
+                bundle = self.client.get(bundle_path)
+            self.assertEqual(bundle.status_code, 200)
+            with patch.dict(app.config, BLOB_READ_WRITE_TOKEN=BLOB_TOKEN), \
+                    patch('flask_app.requests.get') as mock_get:
+                mock_get.return_value = self.file_response(
+                    base64.b64decode(secret['blobs'][0]))
+                frame0 = self.client.get(base_path)
+            self.assertEqual(frame0.status_code, 200)
+            unlock_input = {
+                'password': secret['password'], 'salt': page_salt, 'iv': page_iv,
+                'manifest': manifest_attr, 'count': count,
+                'bundle': base64.b64encode(bundle.data).decode(),
+                'frame0': base64.b64encode(frame0.data).decode(),
+                'names': secret['names'], 'texts': secret['texts'],
+            }
+            unlock_path = Path(directory) / 'unlock.json'
+            unlock_path.write_text(json.dumps(unlock_input), encoding='utf-8')
+            result = subprocess.run(
+                ['node', '-e', verify_script, str(template), str(unlock_path)],
+                capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            out = json.loads(result.stdout)
+        # Recipient sees the original (unsanitized) names and every plaintext.
+        self.assertEqual(out['names'], secret['names'])
+        self.assertEqual(out['texts'], secret['texts'])
+        self.assertEqual(out['text0'], secret['texts'][0])
+        # Wrong password and every kind of tampering are rejected before any
+        # plaintext is produced.
+        self.assertTrue(out['wrongPasswordRejected'])
+        self.assertTrue(out['tamperedManifestRejected'])
+        self.assertTrue(out['countMismatchRejected'])
+        self.assertTrue(out['tamperedFrameRejected'])
+        self.assertTrue(out['badMagicRejected'])
+        self.assertTrue(out['truncatedRejected'])
+        self.assertTrue(out['trailingDataRejected'])
+        self.assertTrue(out['bundleCountMismatchRejected'])
+
+    @unittest.skipUnless(shutil.which('node'), 'node is required to run the EFM1 ZIP builder')
+    def test_browser_zip_builder_matches_python_zipfile(self):
+        template = Path(__file__).with_name('templates') / 'download.html'
+        script = (
+            "const fs = require('fs');\n"
+            "const html = fs.readFileSync(process.argv[1], 'utf8');\n"
+            "const start = html.indexOf('function truncateUtf8Name');\n"
+            "const end = html.indexOf(\"document.getElementById('unlockBtn')\");\n"
+            "if (start < 0 || end <= start) process.exit(2);\n"
+            "eval(html.slice(start, end));\n"
+            "(async () => {\n"
+            "  const enc = new TextEncoder();\n"
+            "  const parts = [\n"
+            "    { name: 'plain.txt', text: 'hello zip' },\n"
+            "    { name: '../evil.txt', text: 'evil body' },\n"
+            "    { name: 'deep\\\\..\\\\..\\\\win.bat', text: 'bat body' },\n"
+            "    { name: 'plain.txt', text: 'duplicate body' },\n"
+            "    { name: 'ünïcode-façé.txt', text: 'unicode body \\u2728' },\n"
+            "    { name: '.hidden', text: 'hidden body' },\n"
+            "    { name: '.\\\\control\\u0000name.txt', text: 'ctrl body' },\n"
+            "  ];\n"
+            "  const zip = await buildStoredZip(parts.map(p => (\n"
+            "    { name: p.name, data: enc.encode(p.text) })));\n"
+            "  fs.writeFileSync(process.argv[2], Buffer.from(zip));\n"
+            "  let err = null;\n"
+            "  try { await buildStoredZip([{ name: 'big.bin', data: { length: 500000001 } }]); }\n"
+            "  catch (e) { err = String(e && e.message || e); }\n"
+            "  process.stdout.write(JSON.stringify({ err }));\n"
+            "})().catch(e => { console.error(e && e.stack || e); process.exit(1); });\n"
+        )
+        with tempfile.TemporaryDirectory(prefix='alienx-zip-') as directory:
+            zip_path = Path(directory) / 'built.zip'
+            result = subprocess.run(
+                ['node', '-e', script, str(template), str(zip_path)],
+                capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            stats = json.loads(result.stdout)
+            expected_names = ['plain.txt', 'evil.txt', 'win.bat', 'plain-2.txt',
+                              'ünïcode-façé.txt', 'hidden', 'controlname.txt']
+            bodies = [b'hello zip', b'evil body', b'bat body', b'duplicate body',
+                      'unicode body ✨'.encode(), b'hidden body', b'ctrl body']
+            with zipfile.ZipFile(zip_path) as archive:
+                # Python's zipfile verifies structure and every CRC32.
+                self.assertIsNone(archive.testzip())
+                self.assertEqual(archive.namelist(), expected_names)
+                for name, body in zip(expected_names, bodies):
+                    with self.subTest(entry=name):
+                        self.assertEqual(archive.read(name), body)
+                self.assertTrue(archive.getinfo('ünïcode-façé.txt').flag_bits & 0x800)
+                for name in archive.namelist():
+                    with self.subTest(safety=name):
+                        self.assertNotIn('/', name)
+                        self.assertNotIn('\\', name)
+                        self.assertNotIn('..', name)
+                        self.assertFalse(name.startswith('.'))
+        self.assertEqual(stats['err'],
+                         'This share is too large to build as one archive here.')
 
     def test_expired_batch_cannot_be_downloaded(self):
         files = [{'name': 'a.txt', 'url': FILE_URL, 'provider': 'litterbox', 'size': 1},
@@ -1712,6 +2348,38 @@ with patch('flask_app.time.time', return_value=float(sys.argv[2])), patch(
                 get_db().execute('SELECT COUNT(*) FROM shares WHERE expires <= ?',
                                  (self.now,)).fetchone()[0], 0)
 
+    def test_expired_encrypted_folder_cannot_serve_ciphertext(self):
+        """Expiry is enforced before any ciphertext route parses the envelope or
+        touches storage, so an expired encrypted folder never hands out bundle
+        frames, individual files or a ZIP. One row per route: cleanup deletes
+        every expired share on the first request."""
+        ciphertext = b'ENCRYPTED-ONE-0123456789'
+        files = [{'name': 'alpha secret.txt', 'url': FILE_URL,
+                  'provider': 'litterbox', 'size': len(ciphertext)},
+                 {'name': 'beta secret.bin', 'url': FILE_URL + 'x',
+                  'provider': 'litterbox', 'size': len(ciphertext)}]
+        for index, template in enumerate(('/download-folder-cipher/{key}',
+                                          '/download-folder/{key}/0',
+                                          '/download-folder-zip/{key}')):
+            key = f'7119{index}'
+            meta = self.insert_encrypted_folder(key, files, expires=self.now - 1)
+            with self.subTest(path=template):
+                with patch('flask_app.requests.get') as mock_get:
+                    response = self.client.get(template.format(key=key))
+                self.assertEqual(response.status_code, 410,
+                                 response.get_data(as_text=True))
+                body = response.get_data(as_text=True)
+                self.assertIn('This share has expired.', body)
+                self.assertNotIn('alpha secret.txt', body)
+                self.assertNotIn('beta secret.bin', body)
+                self.assertNotIn(meta['manifest'], body)
+                self.assertNotIn('AXFC1', body)
+                mock_get.assert_not_called()
+        with app.app_context():
+            self.assertEqual(
+                get_db().execute('SELECT COUNT(*) FROM shares WHERE expires <= ?',
+                                 (self.now,)).fetchone()[0], 0)
+
     def test_batch_upload_accepts_the_full_fifty_file_form_ceiling(self):
         files = [(f'file{i}.txt', f'body-{i}'.encode()) for i in range(50)]
         response = self.batch_upload(files)
@@ -1725,12 +2393,18 @@ with patch('flask_app.time.time', return_value=float(sys.argv[2])), patch(
 
     def test_upload_page_multi_file_one_code_contract(self):
         html = self.client.get('/').get_data(as_text=True)
-        self.assertIn('upload.js?v=8', html)
+        self.assertIn('upload.js?v=9', html)
         self.assertIn('id="multiFileNote"', html)
         self.assertIn('id="passwordNotice"', html)
         js = (Path(app.root_path) / 'static' / 'upload.js').read_text(encoding='utf-8')
         self.assertIn('(mode === "folder" || (queue.length > 1 && !separateCodes))', js)
-        self.assertIn('passwordBlockedReason()', js)
+        # Password batches encrypt before any network call; there is no blocker
+        # that silently disables the password field any more.
+        self.assertIn('async function encryptFolderBatch(password, files)', js)
+        self.assertIn('encrypted = await encryptFolderBatch(password, queue);', js)
+        self.assertIn('Encryption failed before upload:', js)
+        self.assertIn('ENCRYPTED_BATCH_MAX_BYTES', js)
+        self.assertNotIn('passwordBlockedReason', js)
         self.assertIn('MAX_BATCH_FILES = 50', js)
         self.assertIn('"/upload-folder"', js)
         self.assertIn('uploadRequest(data, batchLabel, "/upload-folder")', js)
@@ -1950,7 +2624,7 @@ with patch('flask_app.time.time', return_value=float(sys.argv[2])), patch(
 
     def test_upload_page_separate_codes_option_contract(self):
         html = self.client.get('/').get_data(as_text=True)
-        self.assertIn('upload.js?v=8', html)
+        self.assertIn('upload.js?v=9', html)
         self.assertIn('id="separateCodes"', html)
         self.assertIn('for="separateCodes"', html)
         self.assertNotRegex(html, r'<input type="checkbox" id="separateCodes"[^>]*checked')

@@ -22,7 +22,7 @@
     {{ {'@context': 'https://schema.org', '@type': 'WebSite', 'name': 'AlienXFile', 'alternateName': 'AlienXFile V2', 'url': site_url, 'description': description}|tojson }}
     </script>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-    <script src="{{ url_for('static', filename='upload.js') }}?v=8" defer></script>
+    <script src="{{ url_for('static', filename='upload.js') }}?v=9" defer></script>
 </head>
 <body>
 
@@ -120,7 +120,7 @@
                         <label for="sharePassword">Password protection (optional)</label>
                         <input type="password" id="sharePassword" name="sharePassword" placeholder="Leave empty for no password" autocomplete="new-password">
                         <p class="notice">Encrypts content in your browser. Password never leaves your device.</p>
-                        <p class="notice error-msg" id="passwordNotice" hidden aria-live="polite"></p>
+                        <p class="notice" id="passwordNotice" hidden aria-live="polite"></p>
                     </div>
                     <div class="custom-code-section">
                         <label for="customCode">Custom code (optional)</label>

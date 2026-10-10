@@ -307,6 +307,9 @@
                  data-type="{{ share.type }}"
                  {% if share.type == 'text' %}data-encrypted="{{ share.encrypted_content }}"{% endif %}
                  {% if share.type == 'file' %}data-encrypted-url="{{ share.encrypted_url }}" data-filename="{{ share.name }}"{% endif %}
+                 {% if share.type == 'folder' %}data-manifest="{{ share.manifest.data }}" data-count="{{ share.count }}"
+                    data-folder-base="{{ url_for('download_folder_file', key=share.key, index=0) }}"
+                    data-folder-bundle="{{ url_for('download_folder_cipher', key=share.key) }}"{% endif %}
                  hidden>
             </div>
             <div id="decryptedContent" hidden></div>
@@ -487,6 +490,304 @@
         })();
 
         // Feature 6: Password prompt for encrypted shares
+        async function deriveShareKey(password, saltB64) {
+            const keyMaterial = await crypto.subtle.importKey('raw',
+                new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey']);
+            const saltBuf = Uint8Array.from(atob(saltB64), c => c.charCodeAt(0));
+            return crypto.subtle.deriveKey(
+                { name: 'PBKDF2', salt: saltBuf, iterations: 100000, hash: 'SHA-256' },
+                keyMaterial,
+                { name: 'AES-GCM', length: 256 },
+                false,
+                ['decrypt']
+            );
+        }
+
+        function b64Bytes(value) {
+            const binary = atob(value);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+            return bytes;
+        }
+
+        // EFM1 folder unlock: the manifest is GCM-authenticated, so a wrong
+        // password or any tampering fails before a single entry is revealed.
+        async function unlockFolder(key, manifestB64, manifestIvB64, expectedCount) {
+            if (!Number.isInteger(expectedCount) || expectedCount < 1 || expectedCount > 50) {
+                throw new Error('Folder metadata is invalid.');
+            }
+            const manifestBuf = b64Bytes(manifestB64);
+            if (manifestBuf.byteLength < 32 || manifestBuf.byteLength > 131072) {
+                throw new Error('Folder metadata is invalid.');
+            }
+            const manifestIv = b64Bytes(manifestIvB64);
+            if (manifestIv.byteLength !== 12) throw new Error('Folder metadata is invalid.');
+            const plain = await crypto.subtle.decrypt(
+                { name: 'AES-GCM', iv: manifestIv }, key, manifestBuf);
+            const manifest = JSON.parse(new TextDecoder().decode(plain));
+            if (!manifest || manifest.v !== 1 || !Array.isArray(manifest.files) ||
+                    manifest.files.length !== expectedCount) {
+                throw new Error('Folder manifest is invalid.');
+            }
+            return manifest.files.map(entry => {
+                if (!entry || typeof entry.name !== 'string' || !entry.name ||
+                        entry.name.length > 1024 || !Number.isInteger(entry.size) ||
+                        entry.size < 0 || entry.size > 1000000000 || typeof entry.iv !== 'string') {
+                    throw new Error('Folder manifest entry is invalid.');
+                }
+                const iv = b64Bytes(entry.iv);
+                if (iv.byteLength !== 12) throw new Error('Folder manifest entry is invalid.');
+                return { name: entry.name, size: entry.size, iv };
+            });
+        }
+
+        function parseCipherBundle(buffer, expectedCount) {
+            const magic = 'AXFC1';
+            if (buffer.byteLength < 9) throw new Error('Encrypted download is truncated.');
+            const view = new DataView(buffer);
+            let offset = 0;
+            for (let i = 0; i < magic.length; i++) {
+                if (view.getUint8(offset++) !== magic.charCodeAt(i)) {
+                    throw new Error('Encrypted download has an invalid header.');
+                }
+            }
+            const count = view.getUint32(offset, true);
+            offset += 4;
+            if (count < 1 || count > 50 || count !== expectedCount) {
+                throw new Error('Encrypted download frame count does not match the share.');
+            }
+            const frames = [];
+            let total = 0;
+            for (let i = 0; i < count; i++) {
+                if (offset + 4 > buffer.byteLength) throw new Error('Encrypted download is truncated.');
+                const length = view.getUint32(offset, true);
+                offset += 4;
+                if (length < 16 || length > 1000000000) {
+                    throw new Error('Encrypted download frame size is invalid.');
+                }
+                if (offset + length > buffer.byteLength) throw new Error('Encrypted download is truncated.');
+                total += length;
+                if (total > 500000000) throw new Error('Encrypted download exceeds the archive limit.');
+                frames.push(new Uint8Array(buffer, offset, length));
+                offset += length;
+            }
+            if (offset !== buffer.byteLength) throw new Error('Encrypted download has trailing data.');
+            return frames;
+        }
+
+        async function fetchFolderCiphertext(url) {
+            const resp = await fetch(url);
+            if (!resp.ok) {
+                throw new Error(resp.status === 429
+                    ? 'Too many requests. Wait a moment and try again.'
+                    : 'Could not fetch the encrypted file.');
+            }
+            const declared = Number(resp.headers.get('content-length') || '0');
+            if (declared > 1000000000) throw new Error('Encrypted file is too large to decrypt here.');
+            return new Uint8Array(await resp.arrayBuffer());
+        }
+
+        async function fetchFolderCipherBundle(url, expectedCount) {
+            const resp = await fetch(url);
+            if (!resp.ok) {
+                throw new Error(resp.status === 429
+                    ? 'Too many requests. Wait a moment and try again.'
+                    : 'Could not fetch the encrypted files.');
+            }
+            const declared = Number(resp.headers.get('content-length') || '0');
+            if (declared > 500000000) throw new Error('This share is too large to download as one archive here.');
+            return parseCipherBundle(await resp.arrayBuffer(), expectedCount);
+        }
+
+        async function decryptFolderFrame(key, entry, frame) {
+            if (frame.byteLength !== entry.size + 16) {
+                throw new Error('Encrypted file is corrupt.');
+            }
+            const plain = await crypto.subtle.decrypt(
+                { name: 'AES-GCM', iv: entry.iv }, key, frame);
+            return new Uint8Array(plain);
+        }
+
+        async function downloadFolderEntry(key, keyBase, index, entry) {
+            const frame = await fetchFolderCiphertext(keyBase.slice(0, -1) + String(index));
+            return decryptFolderFrame(key, entry, frame);
+        }
+
+        async function downloadFolderZip(key, bundleUrl, entries) {
+            const frames = await fetchFolderCipherBundle(bundleUrl, entries.length);
+            const parts = [];
+            for (let i = 0; i < entries.length; i++) {
+                parts.push({
+                    name: entries[i].name,
+                    data: await decryptFolderFrame(key, entries[i], frames[i]),
+                });
+            }
+            return buildStoredZip(parts);
+        }
+
+        function truncateUtf8Name(text, maxBytes) {
+            const encoder = new TextEncoder();
+            if (encoder.encode(text).length <= maxBytes) return text;
+            let out = '';
+            let used = 0;
+            for (const ch of text) {
+                const size = encoder.encode(ch).length;
+                if (used + size > maxBytes) break;
+                out += ch;
+                used += size;
+            }
+            return out;
+        }
+
+        // Archive-safe entry names: basename only, no traversal, no control
+        // characters, <=255 UTF-8 bytes, deterministic -2/-3 collision suffixes.
+        function zipEntryNameJS(name, used) {
+            let base = String(name || '').replace(/^[\\/]+/, '');
+            base = base.split(/[\\/]/).pop() || '';
+            base = base.replace(/[\x00-\x1f\x7f]/g, '').replace(/\s+/g, '_');
+            base = base.replace(/^[._]+/, '').replace(/[._]+$/, '');
+            if (!base) base = 'file';
+            base = truncateUtf8Name(base, 255);
+            if (!base) base = 'file';
+            if (!used.has(base)) {
+                used.add(base);
+                return base;
+            }
+            const dot = base.lastIndexOf('.');
+            const hasDot = dot > 0;
+            const stem = hasDot ? base.slice(0, dot) : base;
+            const ext = hasDot ? base.slice(dot) : '';
+            let counter = 2;
+            for (;;) {
+                const suffix = `-${counter}${ext}`;
+                const candidate = stem.slice(0, Math.max(1, 255 - suffix.length)) + suffix;
+                if (!used.has(candidate)) {
+                    used.add(candidate);
+                    return candidate;
+                }
+                counter += 1;
+            }
+        }
+
+        const CRC_TABLE = (function () {
+            const table = new Uint32Array(256);
+            for (let n = 0; n < 256; n++) {
+                let c = n;
+                for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+                table[n] = c >>> 0;
+            }
+            return table;
+        })();
+
+        function crc32JS(bytes) {
+            let crc = 0xFFFFFFFF;
+            for (let i = 0; i < bytes.length; i++) {
+                crc = CRC_TABLE[(crc ^ bytes[i]) & 0xFF] ^ (crc >>> 8);
+            }
+            return (crc ^ 0xFFFFFFFF) >>> 0;
+        }
+
+        function concatBytes(chunks) {
+            let total = 0;
+            for (const chunk of chunks) total += chunk.length;
+            const out = new Uint8Array(total);
+            let pos = 0;
+            for (const chunk of chunks) {
+                out.set(chunk, pos);
+                pos += chunk.length;
+            }
+            return out;
+        }
+
+        // STORE-method ZIP written by hand so the browser can build the archive
+        // from decrypted bytes (the server can never do this for a locked share).
+        async function buildStoredZip(entries) {
+            const encoder = new TextEncoder();
+            const used = new Set();
+            const localChunks = [];
+            const centralChunks = [];
+            let offset = 0;
+            let totalBytes = 0;
+            for (const entry of entries) {
+                const name = zipEntryNameJS(entry.name, used);
+                const nameBytes = encoder.encode(name);
+                const data = entry.data;
+                totalBytes += data.length;
+                if (data.length > 1000000000 || totalBytes > 500000000) {
+                    throw new Error('This share is too large to build as one archive here.');
+                }
+                const crc = crc32JS(data);
+                const local = new Uint8Array(30 + nameBytes.length);
+                const localView = new DataView(local.buffer);
+                localView.setUint32(0, 0x04034b50, true);
+                localView.setUint16(4, 20, true);
+                localView.setUint16(6, 0x0800, true);
+                localView.setUint16(8, 0, true);
+                localView.setUint16(10, 0, true);
+                localView.setUint16(12, 0x0021, true);
+                localView.setUint32(14, crc, true);
+                localView.setUint32(18, data.length, true);
+                localView.setUint32(22, data.length, true);
+                localView.setUint16(26, nameBytes.length, true);
+                localView.setUint16(28, 0, true);
+                local.set(nameBytes, 30);
+                localChunks.push(local, data);
+
+                const central = new Uint8Array(46 + nameBytes.length);
+                const centralView = new DataView(central.buffer);
+                centralView.setUint32(0, 0x02014b50, true);
+                centralView.setUint16(4, 20, true);
+                centralView.setUint16(6, 20, true);
+                centralView.setUint16(8, 0x0800, true);
+                centralView.setUint16(10, 0, true);
+                centralView.setUint16(12, 0, true);
+                centralView.setUint16(14, 0x0021, true);
+                centralView.setUint32(16, crc, true);
+                centralView.setUint32(20, data.length, true);
+                centralView.setUint32(24, data.length, true);
+                centralView.setUint16(28, nameBytes.length, true);
+                centralView.setUint16(30, 0, true);
+                centralView.setUint16(32, 0, true);
+                centralView.setUint16(34, 0, true);
+                centralView.setUint16(36, 0, true);
+                centralView.setUint32(38, 0, true);
+                centralView.setUint32(42, offset, true);
+                central.set(nameBytes, 46);
+                centralChunks.push(central);
+                offset += local.length + data.length;
+            }
+            const centralSize = centralChunks.reduce((sum, chunk) => sum + chunk.length, 0);
+            const eocd = new Uint8Array(22);
+            const eocdView = new DataView(eocd.buffer);
+            eocdView.setUint32(0, 0x06054b50, true);
+            eocdView.setUint16(4, 0, true);
+            eocdView.setUint16(6, 0, true);
+            eocdView.setUint16(8, entries.length, true);
+            eocdView.setUint16(10, entries.length, true);
+            eocdView.setUint32(12, centralSize, true);
+            eocdView.setUint32(16, offset, true);
+            eocdView.setUint16(20, 0, true);
+            return concatBytes([...localChunks, ...centralChunks, eocd]);
+        }
+
+        function formatFileSize(bytes) {
+            if (bytes < 1024) return `${bytes} B`;
+            if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
+            if (bytes < 1073741824) return `${(bytes / 1048576).toFixed(1)} MB`;
+            return `${(bytes / 1073741824).toFixed(1)} GB`;
+        }
+
+        function saveBlobDownload(bytes, filename) {
+            const blobUrl = URL.createObjectURL(new Blob([bytes]));
+            const link = document.createElement('a');
+            link.href = blobUrl;
+            link.download = filename;
+            document.body.append(link);
+            link.click();
+            link.remove();
+            setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+        }
+
         document.getElementById('unlockBtn')?.addEventListener('click', async () => {
             const password = document.getElementById('sharePassword').value;
             const data = document.getElementById('encryptedData');
@@ -496,21 +797,11 @@
             const errorEl = document.getElementById('decryptError');
 
             try {
-                const keyMaterial = await crypto.subtle.importKey('raw',
-                    new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey']);
-                const saltBuf = Uint8Array.from(atob(salt), c => c.charCodeAt(0));
-                const key = await crypto.subtle.deriveKey(
-                    { name: 'PBKDF2', salt: saltBuf, iterations: 100000, hash: 'SHA-256' },
-                    keyMaterial,
-                    { name: 'AES-GCM', length: 256 },
-                    false,
-                    ['decrypt']
-                );
-
-                const ivBuf = Uint8Array.from(atob(iv), c => c.charCodeAt(0));
+                const key = await deriveShareKey(password, salt);
+                const ivBuf = b64Bytes(iv);
 
                 if (type === 'text') {
-                    const encrypted = Uint8Array.from(atob(data.dataset.encrypted), c => c.charCodeAt(0));
+                    const encrypted = b64Bytes(data.dataset.encrypted);
                     const decrypted = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: ivBuf }, key, encrypted);
                     const text = new TextDecoder().decode(decrypted);
                     const container = document.getElementById('decryptedContent');
@@ -566,6 +857,87 @@
                     link.download = filename;
                     link.textContent = 'Download ' + filename;
                     container.append(doneHeading, link);
+                } else if (type === 'folder') {
+                    const entries = await unlockFolder(key, data.dataset.manifest, iv,
+                        Number(data.dataset.count));
+                    const keyBase = data.dataset.folderBase;
+                    const bundleUrl = data.dataset.folderBundle;
+                    const container = document.getElementById('decryptedContent');
+                    container.replaceChildren();
+                    const statusEl = document.createElement('p');
+                    statusEl.className = 'error-msg';
+                    statusEl.hidden = true;
+                    const showStatus = message => {
+                        statusEl.textContent = message;
+                        statusEl.hidden = !message;
+                    };
+                    const heading = document.createElement('h2');
+                    heading.textContent = entries.length + (entries.length === 1 ? ' file' : ' files');
+                    const list = document.createElement('div');
+                    list.className = 'folder-files';
+                    for (let index = 0; index < entries.length; index++) {
+                        const entry = entries[index];
+                        const card = document.createElement('div');
+                        card.className = 'folder-file';
+                        const nameEl = document.createElement('div');
+                        nameEl.className = 'folder-file-name';
+                        nameEl.textContent = entry.name;
+                        const bottom = document.createElement('div');
+                        bottom.className = 'folder-file-bottom';
+                        const sizeEl = document.createElement('span');
+                        sizeEl.className = 'folder-file-size';
+                        sizeEl.textContent = formatFileSize(entry.size);
+                        const link = document.createElement('a');
+                        link.className = 'button secondary';
+                        link.href = '#';
+                        link.textContent = 'Download';
+                        link.setAttribute('aria-label', 'Download ' + entry.name);
+                        link.addEventListener('click', async (event) => {
+                            event.preventDefault();
+                            link.textContent = 'Decrypting…';
+                            showStatus('');
+                            try {
+                                const plain = await downloadFolderEntry(key, keyBase, index, entry);
+                                saveBlobDownload(plain, entry.name);
+                                link.textContent = 'Download';
+                            } catch {
+                                link.textContent = 'Download';
+                                showStatus('Could not decrypt ' + entry.name +
+                                    '. The share data may be damaged or unavailable.');
+                            }
+                        });
+                        bottom.append(sizeEl, link);
+                        card.append(nameEl, bottom);
+                        list.append(card);
+                    }
+                    container.append(heading, list);
+                    if (entries.length > 1) {
+                        const zipBtn = document.createElement('button');
+                        zipBtn.type = 'button';
+                        zipBtn.className = 'button';
+                        const zipLabel = 'Download ZIP (' + entries.length + ' files)';
+                        zipBtn.textContent = zipLabel;
+                        zipBtn.addEventListener('click', async () => {
+                            zipBtn.disabled = true;
+                            zipBtn.textContent = 'Preparing ZIP…';
+                            showStatus('');
+                            try {
+                                const zipBytes = await downloadFolderZip(key, bundleUrl, entries);
+                                saveBlobDownload(zipBytes, heading.textContent + '.zip');
+                            } catch (error) {
+                                showStatus(error && error.message
+                                    ? error.message
+                                    : 'Could not build the ZIP from this share.');
+                            } finally {
+                                zipBtn.textContent = zipLabel;
+                                zipBtn.disabled = false;
+                            }
+                        });
+                        container.append(zipBtn);
+                    }
+                    container.append(statusEl);
+                    container.hidden = false;
+                    document.getElementById('passwordPrompt').hidden = true;
                 }
             } catch (e) {
                 errorEl.textContent = 'Decryption failed. Wrong password?';
