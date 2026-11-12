@@ -179,6 +179,7 @@ app.config.update(
     RATE_WINDOW_SECONDS=600,
     # MCP endpoint (POST /mcp): off unless explicitly enabled; API key optional.
     MCP_ENABLED=os.environ.get('ALIENX_MCP_ENABLED', '0') == '1',
+    MCP_OAUTH_ENABLED=_enabled_env('MCP_OAUTH_ENABLED', '1'),
     MCP_API_KEY=os.environ.get('MCP_API_KEY', ''),
     MCP_MAX_UPLOAD_BYTES=mcp_max_upload_bytes,
     MCP_RATE_LIMIT=int(os.environ.get('MCP_RATE_LIMIT', 60)),

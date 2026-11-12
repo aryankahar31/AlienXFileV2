@@ -607,6 +607,18 @@ class OAuthTest(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertIn('tools', body['result'])
 
+    def test_mcp_oauth_can_be_disabled_for_static_key_mode(self):
+        _, data = self.register(scope='alienxfile:admin')
+        token = self.token_for(data['client_id'], scope='alienxfile:admin')['access_token']
+        with patch.dict(app.config, MCP_OAUTH_ENABLED=False, MCP_API_KEY='static-key'):
+            denied, body = self.rpc('tools/list', headers={'Authorization': 'Bearer ' + token})
+            self.assertEqual(denied.status_code, 401)
+            self.assertEqual(body['error']['code'], -32001)
+            response, body = self.rpc('tools/list', headers={
+                'Authorization': 'Bearer static-key'})
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('tools', body['result'])
+
     def _admin_token(self):
         _, data = self.register(scope='alienxfile:admin')
         return self.token_for(data['client_id'], scope='alienxfile:admin')['access_token']

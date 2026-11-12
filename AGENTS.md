@@ -33,7 +33,7 @@ Temporary file and text sharing platform with dual storage (Vercel Blob default 
 | `test_mcp.py` | 53 MCP tests, all passing |
 | `test_pages.py` | 7 tests for /privacy /terms /support + challenge route, all passing |
 | `oauth/` | OAuth 2.1 package: `constants.py` schema/scopes, `security.py` Argon2/PKCE/CSRF, `store.py` DB, `metadata.py` discovery, `blueprint.py` routes |
-| `test_oauth.py` | 35 OAuth flow, scope, auth, revocation, CIMD and hardening tests |
+| `test_oauth.py` | 36 OAuth flow, scope, auth, revocation, CIMD and hardening tests |
 | `test_multiclient.py` | 8 independent-client isolation tests |
 | `test_postgres_oauth.py` | PostgreSQL HTTP OAuth login/consent/token/refresh/revocation test |
 | `docs/OAUTH.md` / `docs/MCP_CLIENTS.md` / `docs/DEPLOYMENT.md` | OAuth design, client setup, deployment steps |
@@ -42,7 +42,7 @@ Temporary file and text sharing platform with dual storage (Vercel Blob default 
 | `pa_proxy/fly.toml` | Fly.io config |
 | `README.md` | Documentation |
 
-## Features Implemented (39 → 194 tests)
+## Features Implemented (39 → 195 tests)
 
 ### Core Features
 1. Paste text/files
@@ -182,10 +182,10 @@ Temporary file and text sharing platform with dual storage (Vercel Blob default 
 - Scopes `alienxfile:read|write|delete|admin`; default grant read+write; MCP tools enforce read/write per action and admin as a superset. `MCP_API_KEY` remains an optional admin fallback; anonymous dev mode is preserved when no owner/API key is configured.
 - Tokens, codes, secrets and sessions are stored only as SHA-256 hashes; owner password uses Argon2id. CIMD fetches are bounded, SSRF-checked, HTTPS-only and cached for an hour.
 - Owner UI at `/login` and `/account`; opaque `WWW-Authenticate: Bearer resource_metadata=…` challenges from `/mcp`; scope failures return JSON-RPC `-32001` with HTTP 403 and `insufficient_scope`.
-- New tests: `test_oauth.py` (35) and `test_multiclient.py` (8); no push/deploy performed.
+- New tests: `test_oauth.py` (36) and `test_multiclient.py` (8); no push/deploy performed.
 
 ## Testing
-- 194 tests passing with PostgreSQL configured (0 skipped); without `ALIENX_TEST_DATABASE_URL`, 186 run + 8 PostgreSQL skips: `python3 -m unittest discover -v` → `test_download.py` (83) + `test_mcp.py` (53) + `test_pages.py` (7) + `test_oauth.py` (35) + `test_multiclient.py` (8) + `test_postgres.py` (7) + `test_postgres_oauth.py` (1)
+- 195 tests passing with PostgreSQL configured (0 skipped); without `ALIENX_TEST_DATABASE_URL`, 187 run + 8 PostgreSQL skips: `python3 -m unittest discover -v` → `test_download.py` (83) + `test_mcp.py` (53) + `test_pages.py` (7) + `test_oauth.py` (36) + `test_multiclient.py` (8) + `test_postgres.py` (7) + `test_postgres_oauth.py` (1)
 - Website tests cover: upload, download, text, file, folder, encryption, rate limiting, CSP headers, QR codes, preview endpoint, custom codes, dark mode, template escaping, encrypted-preview 400, Litterbox preview User-Agent, preview-category page parity, decrypt DOM contract, markdown link allowlist (executes `renderMarkdown` in `node`), hostile filename sanitization, ZIP traversal/collision safety, storage-URL revalidation, url-meta redirect hardening, preview/urlmeta rate buckets, multi-file single-code batches (one share, per-file download, ZIP names/duplicates/traversal, expiry, 50-file form ceiling, frontend contract), separate-codes option (default OFF batch vs opt-in per-file `/upload`, single-file path, folder ignore, partial-failure reporting, no-regression guards), EFM1 encrypted batches (parameter validation before storage, all-or-nothing cleanup + 409 path, page/API leak sweep, ciphertext-only downloads with neutral names, framed cipher bundle + traversal/format checks, shared lookup-bucket429, corrupt-content 500, expiry before any ciphertext fetch (410 on cipher/per-file/ZIP), streamed byte-identical bundle framing (generator + >64 KB multi-chunk), bundle concurrency slot (429 without storage fetch + release-on-close), client contracts for upload.js/download.html, cross-language node round trip: encrypt in `upload.js` → Python serve → unlock/tamper-reject in `download.html`, browser ZIP → Python `zipfile` interop with CRC/UTF-8/traversal checks)
 - MCP tests cover: handshake, tools/list schema, all 5 tools, expiry aliases, auth (missing/wrong/right key), disabled 404, rate buckets, daily byte budgets (per-IP + global, fail-closed DB path, window reset), JSON-RPC error matrix, 413/415/403/405, DB-failure JSON shape, encrypted-share no-ciphertext, no-secrets sweep
 - Pages tests cover: DB-free rendering, indexable headers/canonicals, fact-checked privacy/terms content, support email gating, challenge token exact-by-body/plain-text behavior, discovery untouched
