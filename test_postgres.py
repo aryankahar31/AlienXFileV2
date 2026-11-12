@@ -205,9 +205,15 @@ with patch('flask_app.time.time', return_value=float(sys.argv[2])), patch(
                                        FROM information_schema.columns
                                        WHERE table_schema = current_schema() AND table_name = 'shares'
                                        ORDER BY ordinal_position''').fetchall()
-                self.assertEqual([row['column_name'] for row in schema], [*columns, 'provider'])
-                self.assertEqual(schema[-1]['data_type'], 'text')
-                self.assertEqual(schema[-1]['column_default'], "'vercel'::text")
+                self.assertEqual([row['column_name'] for row in schema],
+                                 [*columns, 'salt', 'iv', 'is_encrypted', 'provider'])
+                encrypted_columns = {row['column_name']: row for row in schema}
+                self.assertEqual(encrypted_columns['salt']['data_type'], 'text')
+                self.assertEqual(encrypted_columns['iv']['data_type'], 'text')
+                self.assertEqual(encrypted_columns['is_encrypted']['data_type'], 'integer')
+                self.assertEqual(encrypted_columns['is_encrypted']['column_default'], '0')
+                self.assertEqual(encrypted_columns['provider']['data_type'], 'text')
+                self.assertEqual(encrypted_columns['provider']['column_default'], "'vercel'::text")
                 rows = db.execute('SELECT * FROM shares ORDER BY key').fetchall()
                 self.assertEqual([tuple(row[name] for name in columns) for row in rows], legacy)
                 self.assertEqual([row['provider'] for row in rows], [None, 'vercel', 'litterbox', 'litterbox'])
