@@ -28,6 +28,7 @@ from werkzeug.utils import secure_filename
 
 from oauth.constants import OAUTH_SCHEMA
 from oauth.security import hash_password
+from pa_proxy.tickets import TICKET_TTL_SECONDS, issue_ticket
 
 app = Flask(__name__)
 SITE_URL = 'https://alienxfilev2.onrender.com/'
@@ -414,7 +415,8 @@ def cleanup_shares():
 
 
 def error_response(message, status):
-    if request.path in ('/upload', '/upload-folder', '/upload-litterbox', '/bulk-download', '/api/url-meta'):
+    if request.path in ('/upload', '/upload-folder', '/upload-litterbox', '/bulk-download',
+                        '/api/url-meta', '/api/litterbox-ticket'):
         return jsonify(success=False, uploads=[], errors=[], error=message), status
     if request.path == '/mcp':
         # MCP clients only understand JSON-RPC, never the website's HTML error page.
@@ -452,6 +454,12 @@ def limit_requests():
     if request.endpoint in {'upload', 'upload_folder', 'upload_litterbox'}:
         action, limit = 'upload', app.config['UPLOAD_RATE_LIMIT']
         window = app.config['RATE_WINDOW_SECONDS']
+    elif request.endpoint == 'litterbox_ticket':
+        # Minting a proxy ticket authorises one upstream upload, so it shares
+        # the website upload budget instead of getting its own allowance.
+        action, limit = 'upload', app.config['UPLOAD_RATE_LIMIT']
+        window = app.config['RATE_WINDOW_SECONDS']
+        request.max_content_length = 4_096
     elif request.endpoint in {'download_details', 'download_direct', 'share_qr',
                               'bulk_download', 'download_folder_file', 'download_folder_zip',
                               'download_folder_cipher'} or (
@@ -1023,6 +1031,32 @@ def upload_folder():
     # Surface per-file failures alongside the successful share: a batch that
     # silently dropped files would look complete on the result panel.
     return jsonify(success=True, uploads=[shared], errors=errors)
+
+
+@app.route('/api/litterbox-ticket', methods=['POST'])
+def litterbox_ticket():
+    """Mint a short-lived upload ticket for the Litterbox proxy.
+
+    The browser uploads large files straight to the proxy so the bytes never
+    pass through this web service. The proxy must not accept anonymous
+    uploads, and the shared proxy secret must never reach the browser, so
+    this endpoint hands out a signed, single-use ticket that is bound to the
+    file size instead.
+    """
+    data = request.get_json(silent=True) or {}
+    size = data.get('size', 0)
+    expire = data.get('expire', '1h')
+    if isinstance(size, bool) or not isinstance(size, (int, float)):
+        return error_response('Invalid file size.', 400)
+    if size < 0 or size > MAX_FILE_BYTES:
+        return error_response('Invalid file size.', 400)
+    if expire not in expire_seconds:
+        return error_response('Choose a valid share mode and expiration.', 400)
+    secret = (app.config.get('LITTERBOX_PROXY_SECRET') or '').strip()
+    if not secret:
+        return error_response('The storage proxy is not configured.', 503)
+    ticket = issue_ticket(secret, size=int(size))
+    return jsonify(ticket=ticket, expires_in=TICKET_TTL_SECONDS, max_bytes=MAX_FILE_BYTES)
 
 
 @app.route('/upload-litterbox', methods=['POST'])
