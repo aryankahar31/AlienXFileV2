@@ -1,0 +1,35 @@
+{% extends "_oauth_base.html" %}
+{% block title %}Account{% endblock %}
+{% block content %}
+<h1>Account</h1>
+<p class="oauth-sub">Signed in as {{ owner_name }}. Manage the applications connected to your MCP server.</p>
+{% if error %}<div class="oauth-error" role="alert">{{ error }}</div>{% endif %}
+{% if clients %}
+    {% for client in clients %}
+    <div class="client-box">
+        <h2>{{ client.client_name }}</h2>
+        <div class="client-meta">Client ID: {{ client.client_id }}</div>
+        <div class="client-meta">Scopes: {{ client.granted_scopes|join(', ') }}</div>
+        <form method="post" action="{{ url_for('oauth.revoke_client_form') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="client_id" value="{{ client.client_id }}">
+            <button class="oauth-btn danger" type="submit">Revoke access</button>
+        </form>
+    </div>
+    {% endfor %}
+{% else %}
+    <div class="client-box">
+        <h2>No connected applications</h2>
+        <div class="client-meta">When you authorize an MCP client, it will appear here.</div>
+    </div>
+{% endif %}
+<div class="oauth-actions">
+    <form method="post" action="{{ url_for('oauth.logout') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="oauth-btn secondary" type="submit">Sign out</button>
+    </form>
+    <form method="get" action="{{ url_for('index') }}">
+        <button class="oauth-btn" type="submit">Back to AlienXFile</button>
+    </form>
+</div>
+{% endblock %}

@@ -1,0 +1,91 @@
+name: CI
+
+# Continuous integration for AlienXFileV2.
+# The job matrix covers the SQLite suite on every supported Python release and
+# a separate job runs the same suite against PostgreSQL 17, which is the
+# production database engine.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# The workflow only needs to read the repository. No write scopes, no
+# deployment permissions and no production secrets are used here.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sqlite:
+    name: SQLite suite (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.12', '3.13']
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: ci/requirements-lock.txt
+
+      - name: Install pinned dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r ci/requirements-lock.txt
+
+      - name: Run the test suite (SQLite)
+        # The PostgreSQL-specific tests skip themselves when
+        # ALIENX_TEST_DATABASE_URL is not set.
+        run: python -m unittest discover -v
+
+  postgres:
+    name: PostgreSQL 17 suite
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          # Throwaway credentials for an ephemeral CI container. They are not
+          # production secrets and grant access to nothing outside this job.
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: alienx_test
+        ports:
+          - '5432:5432'
+        options: >-
+          --health-cmd "pg_isready -U postgres -d alienx_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ALIENX_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/alienx_test
+      DATABASE_URL: ''
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: ci/requirements-lock.txt
+
+      - name: Install pinned dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r ci/requirements-lock.txt
+
+      - name: Run the full suite (SQLite + PostgreSQL)
+        run: python -m unittest discover -v

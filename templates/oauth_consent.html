@@ -1,0 +1,35 @@
+{% extends "_oauth_base.html" %}
+{% block title %}Authorize {{ client_name }}{% endblock %}
+{% block content %}
+<h1>Authorize {{ client_name }}</h1>
+<p class="oauth-sub">This client wants to access your AlienXFile account.</p>
+{% if error %}<div class="oauth-error" role="alert">{{ error }}</div>{% endif %}
+<div class="client-box">
+    <h2>{{ client_name }}</h2>
+    <div class="client-meta">Redirects to: {{ redirect_uri }}</div>
+</div>
+<ul class="scope-list">
+    {% for scope, description in scopes %}
+    <li><code>{{ scope }}</code> - {{ description }}</li>
+    {% endfor %}
+</ul>
+<div class="oauth-actions">
+    <form method="post" action="{{ url_for('oauth.authorize') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        {% for name, value in hidden.items() %}
+        <input type="hidden" name="{{ name }}" value="{{ value }}">
+        {% endfor %}
+        <input type="hidden" name="decision" value="approve">
+        <button class="oauth-btn" type="submit">Approve</button>
+    </form>
+    <form method="post" action="{{ url_for('oauth.authorize') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        {% for name, value in hidden.items() %}
+        <input type="hidden" name="{{ name }}" value="{{ value }}">
+        {% endfor %}
+        <input type="hidden" name="decision" value="deny">
+        <button class="oauth-btn secondary" type="submit">Deny</button>
+    </form>
+</div>
+<p class="oauth-footer">You can revoke access at any time from your <a href="{{ url_for('oauth.account') }}">account page</a>.</p>
+{% endblock %}

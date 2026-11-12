@@ -955,8 +955,23 @@ form.addEventListener("submit", async event => {
                     const paData = new FormData();
                     paData.append("time", expire);
                     paData.append("fileToUpload", fileToUpload);
+                    status.textContent = `${label}: authorizing storage upload...`;
+                    // The proxy refuses anonymous uploads, so it is authorised
+                    // with a short-lived ticket minted here. The shared proxy
+                    // secret never leaves the server.
+                    const ticketResp = await fetch("/api/litterbox-ticket", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ size: fileToUpload.size, expire }),
+                    });
+                    if (!ticketResp.ok) throw new Error("Could not authorize the storage upload.");
+                    const ticketData = await ticketResp.json();
+                    if (!ticketData || typeof ticketData.ticket !== "string" || !ticketData.ticket) {
+                        throw new Error("Could not authorize the storage upload.");
+                    }
                     status.textContent = `${label}: uploading directly to storage...`;
-                    const paXhr = await uploadRequest(paData, label, LITTERBOX_PROXY_URL + "/upload");
+                    const paXhr = await uploadRequest(paData, label, LITTERBOX_PROXY_URL + "/upload",
+                        { "X-Upload-Ticket": ticketData.ticket });
                     let paResponse;
                     try {
                         paResponse = JSON.parse(paXhr.responseText);

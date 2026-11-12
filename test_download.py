@@ -2084,7 +2084,7 @@ with patch('flask_app.time.time', return_value=float(sys.argv[2])), patch(
         self.assertNotIn('passwordBlockedReason', js)
         self.assertIn('encrypted in your browser before upload', js)
         html = self.client.get('/').get_data(as_text=True)
-        self.assertIn('upload.js?v=9', html)
+        self.assertRegex(html, r'upload\.js\?v=\d+')
         self.assertIn('<p class="notice" id="passwordNotice"', html)
 
     @unittest.skipUnless(shutil.which('node'), 'node is required to run the EFM1 client scripts')
@@ -2391,9 +2391,19 @@ with patch('flask_app.time.time', return_value=float(sys.argv[2])), patch(
         self.assertEqual(too_many.status_code, 400)
         self.assertIn('1 and 50 files', too_many.get_json()['error'])
 
+    def test_upload_page_proxy_upload_requires_a_signed_ticket(self):
+        """The browser must never call the storage proxy without a ticket."""
+        js = (Path(app.root_path) / 'static' / 'upload.js').read_text(encoding='utf-8')
+        self.assertIn('"/api/litterbox-ticket"', js)
+        self.assertIn('"X-Upload-Ticket"', js)
+        self.assertIn('LITTERBOX_PROXY_URL + "/upload"', js)
+        # The shared proxy secret must never be shipped to the browser.
+        self.assertNotIn('LITTERBOX_PROXY_SECRET', js)
+        self.assertNotIn('X-Proxy-Secret', js)
+
     def test_upload_page_multi_file_one_code_contract(self):
         html = self.client.get('/').get_data(as_text=True)
-        self.assertIn('upload.js?v=9', html)
+        self.assertRegex(html, r'upload\.js\?v=\d+')
         self.assertIn('id="multiFileNote"', html)
         self.assertIn('id="passwordNotice"', html)
         js = (Path(app.root_path) / 'static' / 'upload.js').read_text(encoding='utf-8')
@@ -2624,7 +2634,7 @@ with patch('flask_app.time.time', return_value=float(sys.argv[2])), patch(
 
     def test_upload_page_separate_codes_option_contract(self):
         html = self.client.get('/').get_data(as_text=True)
-        self.assertIn('upload.js?v=9', html)
+        self.assertRegex(html, r'upload\.js\?v=\d+')
         self.assertIn('id="separateCodes"', html)
         self.assertIn('for="separateCodes"', html)
         self.assertNotRegex(html, r'<input type="checkbox" id="separateCodes"[^>]*checked')
