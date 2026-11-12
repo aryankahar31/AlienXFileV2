@@ -10,7 +10,7 @@ Temporary file and text sharing platform with dual storage (Vercel Blob default 
 - **Litterbox API**: `POST https://litterbox.catbox.moe/resources/internals/api.php` (`reqtype=fileupload`, `time=1h|12h|24h|72h`)
 - **Render → Litterbox 412 fix**: Set `User-Agent: curl/8.5.0` (BunkerWeb blocks python-requests UA)
 - **Fly.io proxy**: `https://alienxfile-proxy.fly.dev` — app `alienxfile-proxy`, region `sjc`, 1GB RAM shared VM, 1 gunicorn worker, 600s timeout, `max-requests 50`, `MAX_CONTENT_LENGTH=1GB`
-- **Proxy secret**: `gYDer61eCkvjXS153-ZHgj0m77ykWDmcmAIYoiz2oKo`
+- **Proxy secret**: stored only in the Fly.io secret `LITTERBOX_PROXY_SECRET` and in the Render environment variable of the same name (never in source)
 - **CSP**: `connect-src 'self' https://alienxfile-proxy.fly.dev`; `style-src` includes `https://fonts.googleapis.com`; `font-src https://fonts.gstatic.com`; `media-src 'self'`; `object-src 'self'`
 - **Upload limits**: Default 1GB (`MAX_FILE_BYTES = 1_000_000_000`); Litterbox ~1GB; `MAX_ZIP_TOTAL_BYTES = 500_000_000`
 - **Architecture**: Browser → Fly.io `/upload` → Litterbox → URL → Render `/upload-litterbox` → DB save → 5-digit code
@@ -28,7 +28,7 @@ Temporary file and text sharing platform with dual storage (Vercel Blob default 
 | `static/style.css` | CSS — neo-brutalist design, dark mode, graph-paper grid |
 | `templates/index.html` | Upload page — file/folder/text modes, advanced options |
 | `templates/download.html` | Download page — preview system, lightbox, countdown, decryption |
-| `test_download.py` | 83 tests, all passing |
+| `test_download.py` | 84 tests, all passing |
 | `mcp.py` | MCP blueprint — stateless JSON-RPC 2.0 at `POST /mcp` (5 tools, Phase 1 auth, daily byte budgets) |
 | `test_mcp.py` | 53 MCP tests, all passing |
 | `test_pages.py` | 7 tests for /privacy /terms /support + challenge route, all passing |
@@ -36,13 +36,19 @@ Temporary file and text sharing platform with dual storage (Vercel Blob default 
 | `test_oauth.py` | 36 OAuth flow, scope, auth, revocation, CIMD and hardening tests |
 | `test_multiclient.py` | 8 independent-client isolation tests |
 | `test_postgres_oauth.py` | PostgreSQL HTTP OAuth login/consent/token/refresh/revocation test |
+| `test_mcp_auth.py` | 12 MCP authentication posture tests (disabled/no owner/no token/invalid token/scopes) |
+| `test_pa_proxy.py` | 25 Litterbox proxy + upload-ticket tests |
+| `test_proxy_trust.py` | 7 reverse-proxy trust and HSTS tests |
+| `pa_proxy/tickets.py` | Signed, single-use upload tickets shared by the app and the proxy |
+| `ci/requirements-lock.txt` | Pinned dependency lock used by CI |
+| `.github/workflows/ci.yml` | CI: SQLite matrix + PostgreSQL 17 service container |
 | `docs/OAUTH.md` / `docs/MCP_CLIENTS.md` / `docs/DEPLOYMENT.md` | OAuth design, client setup, deployment steps |
 | `render.yaml` | Render Blueprint config |
 | `pa_proxy/app.py` | Fly.io proxy app |
 | `pa_proxy/fly.toml` | Fly.io config |
 | `README.md` | Documentation |
 
-## Features Implemented (39 → 195 tests)
+## Features Implemented (39 → 240 tests)
 
 ### Core Features
 1. Paste text/files
@@ -179,21 +185,33 @@ Temporary file and text sharing platform with dual storage (Vercel Blob default 
 
 ### Personal OAuth 2.1 (branch `feat/personal-oauth-mcp`)
 - Single-owner authorization server: discovery + protected-resource metadata, DCR, CIMD, authorization-code + PKCE S256, rotating refresh tokens with family revocation, RFC 7009 revocation, Argon2id owner login, DB-backed HttpOnly sessions, CSRF-protected login/consent/account forms.
-- Scopes `alienxfile:read|write|delete|admin`; default grant read+write; MCP tools enforce read/write per action and admin as a superset. `MCP_API_KEY` remains an optional admin fallback; anonymous dev mode is preserved when no owner/API key is configured.
+- Scopes `alienxfile:read|write|delete|admin`; default grant read+write; MCP tools enforce read/write per action and admin as a superset. `MCP_API_KEY` remains an optional admin fallback; without any credential `/mcp` fails closed (HTTP 503) instead of serving tools anonymously.
 - Tokens, codes, secrets and sessions are stored only as SHA-256 hashes; owner password uses Argon2id. CIMD fetches are bounded, SSRF-checked, HTTPS-only and cached for an hour.
 - Owner UI at `/login` and `/account`; opaque `WWW-Authenticate: Bearer resource_metadata=…` challenges from `/mcp`; scope failures return JSON-RPC `-32001` with HTTP 403 and `insufficient_scope`.
 - New tests: `test_oauth.py` (36) and `test_multiclient.py` (8); no push/deploy performed.
 
+### Security remediation for PR #2 (branch `feat/personal-oauth-mcp`)
+- **MCP fails closed**: `/mcp` never serves tools anonymously any more. With an owner account it demands an OAuth access token (401 + `WWW-Authenticate: Bearer resource_metadata=…`), with only `MCP_API_KEY` it demands that key, and with neither it answers HTTP 503 (JSON-RPC `-32003`) and exposes no tools. Anonymous access survives only behind the explicit `MCP_ALLOW_ANONYMOUS` development opt-in, and is read-only unless `MCP_ALLOW_ANONYMOUS_WRITES` is also set.
+- **Proxy authentication**: the public `/upload` route on the Fly proxy now requires a signed, single-use, size-bound upload ticket minted by the web service at `POST /api/litterbox-ticket` (counted against the website upload budget). The shared secret never reaches the browser. The proxy rate limits uploads per client address and rejects replays.
+- **Proxy startup safety**: `pa_proxy/app.py` refuses to start when `LITTERBOX_PROXY_SECRET` is missing, shorter than 24 characters, or a placeholder; `pa_proxy/wsgi.py` no longer installs a `CHANGE_ME_TO_A_RANDOM_SECRET` fallback; secret comparison uses `hmac.compare_digest`.
+- **Repository credential**: the Fly proxy secret that was committed in `AGENTS.md` was replaced by a reference to the environment variable that stores it. No history rewrite or force-push was performed, so the value stays retrievable from old commits and must be rotated.
+- **Reverse-proxy hardening**: `apply_proxy_trust()` enables `ProxyFix` (scheme only) exclusively behind Render/PythonAnywhere, so `X-Forwarded-Proto` cannot mark a direct request as HTTPS; `X-Forwarded-For` and `Host` stay untrusted. Real HTTPS requests now emit HSTS.
+- **Bug fix found by the new tests**: the proxy validated returned Litterbox URLs against `litter.catbox.mooe` (typo) while every other file uses `litter.catbox.moe`, so every proxied upload was rejected with HTTP 502.
+- **CI**: `.github/workflows/ci.yml` runs the SQLite suite on Python 3.12/3.13 and the full suite against a PostgreSQL 17 service container with pinned dependencies and `contents: read` permissions only. Recommended branch protection is documented in `docs/DEPLOYMENT.md`.
+
 ## Testing
-- 195 tests passing with PostgreSQL configured (0 skipped); without `ALIENX_TEST_DATABASE_URL`, 187 run + 8 PostgreSQL skips: `python3 -m unittest discover -v` → `test_download.py` (83) + `test_mcp.py` (53) + `test_pages.py` (7) + `test_oauth.py` (36) + `test_multiclient.py` (8) + `test_postgres.py` (7) + `test_postgres_oauth.py` (1)
+- 240 tests passing with PostgreSQL 17.11 configured (0 skipped); without `ALIENX_TEST_DATABASE_URL`, 232 run + 8 PostgreSQL skips: `python3 -m unittest discover -v` → `test_download.py` (84) + `test_mcp.py` (53) + `test_mcp_auth.py` (12) + `test_pages.py` (7) + `test_oauth.py` (36) + `test_multiclient.py` (8) + `test_pa_proxy.py` (25) + `test_proxy_trust.py` (7) + `test_postgres.py` (7) + `test_postgres_oauth.py` (1)
 - Website tests cover: upload, download, text, file, folder, encryption, rate limiting, CSP headers, QR codes, preview endpoint, custom codes, dark mode, template escaping, encrypted-preview 400, Litterbox preview User-Agent, preview-category page parity, decrypt DOM contract, markdown link allowlist (executes `renderMarkdown` in `node`), hostile filename sanitization, ZIP traversal/collision safety, storage-URL revalidation, url-meta redirect hardening, preview/urlmeta rate buckets, multi-file single-code batches (one share, per-file download, ZIP names/duplicates/traversal, expiry, 50-file form ceiling, frontend contract), separate-codes option (default OFF batch vs opt-in per-file `/upload`, single-file path, folder ignore, partial-failure reporting, no-regression guards), EFM1 encrypted batches (parameter validation before storage, all-or-nothing cleanup + 409 path, page/API leak sweep, ciphertext-only downloads with neutral names, framed cipher bundle + traversal/format checks, shared lookup-bucket429, corrupt-content 500, expiry before any ciphertext fetch (410 on cipher/per-file/ZIP), streamed byte-identical bundle framing (generator + >64 KB multi-chunk), bundle concurrency slot (429 without storage fetch + release-on-close), client contracts for upload.js/download.html, cross-language node round trip: encrypt in `upload.js` → Python serve → unlock/tamper-reject in `download.html`, browser ZIP → Python `zipfile` interop with CRC/UTF-8/traversal checks)
 - MCP tests cover: handshake, tools/list schema, all 5 tools, expiry aliases, auth (missing/wrong/right key), disabled 404, rate buckets, daily byte budgets (per-IP + global, fail-closed DB path, window reset), JSON-RPC error matrix, 413/415/403/405, DB-failure JSON shape, encrypted-share no-ciphertext, no-secrets sweep
 - Pages tests cover: DB-free rendering, indexable headers/canonicals, fact-checked privacy/terms content, support email gating, challenge token exact-by-body/plain-text behavior, discovery untouched
 - PostgreSQL tests cover: persistence, fractional expiry, collisions/transactions, parallel rate limits, provider URLs, safe outage handling, legacy migration plus encryption columns, and the full OAuth browser login/consent/code/refresh/revocation flow
+- MCP authentication tests cover: endpoint disabled (no tools), no owner configured (503, no anonymous fallback), missing token (401 + Bearer challenge with resource metadata), invalid token, malformed Authorization header, revoked token, read-only vs write scopes, and the explicit anonymous development opt-in
+- Proxy tests cover: startup refusal without/with a placeholder/short secret, server-route secret checks, ticket minting and verification, forged/expired/replayed/undersized tickets, per-client rate limits, CORS preflight, and that credentials never reach the logs
+- Proxy-trust tests cover: `X-Forwarded-Proto` ignored without a trusted proxy, honoured behind one, `X-Forwarded-For` never trusted, and HSTS only on real HTTPS
 
 ## MCP Environment Variables (Step 7 — deploy when enabling)
 - `ALIENX_MCP_ENABLED` (default `"0"` — off; set `1` in Render dashboard to enable)
-- `MCP_API_KEY` (sync: false — set a long random value; empty = anonymous dev mode)
+- `MCP_API_KEY` (sync: false — set a long random value; empty means `/mcp` requires OAuth, or refuses requests when no owner hash is configured)
 - `ALIENX_PUBLIC_BASE_URL` (default `https://alienxfilev2.onrender.com`)
 - `MCP_MAX_UPLOAD_BYTES` (5242880 = 5 MiB), `MCP_RATE_LIMIT` (60), `MCP_LOOKUP_RATE_LIMIT` (20), `MCP_RATE_WINDOW` (600), `MCP_ALLOWED_ORIGINS` (chatgpt.com + chat.openai.com)
 - `MCP_DAILY_BYTES_PER_IP` (52428800 = 50 MiB), `MCP_GLOBAL_DAILY_BYTES` (314572800 = 300 MiB), `MCP_DAILY_BYTES_WINDOW` (86400, min 60) — daily byte budgets in `rate_limits` action `mcp_bytes`
