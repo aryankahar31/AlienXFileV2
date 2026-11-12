@@ -58,7 +58,7 @@ Run the Python tests from the project directory after installing the dependencie
 python -m unittest discover -v
 ```
 
-The optional PostgreSQL integration tests in `test_postgres.py` use `ALIENX_TEST_DATABASE_URL` and isolated test schemas; they skip when the variable is unset. Supply a direct, unpooled connection URL privately for an authorized test database whose role can create/drop schemas. Neon pooled connections reject the tests' schema-specific startup options; the application itself does not use those options. Run `python -m unittest test_postgres -v` to exercise that backend. Never use a production database for destructive testing.
+The optional PostgreSQL integration tests in `test_postgres.py` and `test_postgres_oauth.py` use `ALIENX_TEST_DATABASE_URL` and isolated test schemas; they skip when the variable is unset. Supply a direct, unpooled connection URL privately for an authorized test database whose role can create/drop schemas. Neon pooled connections reject the tests' schema-specific startup options; the application itself does not use those options. Run `python -m unittest test_postgres test_postgres_oauth -v` to exercise that backend. Never use a production database for destructive testing.
 
 Local tests are not evidence that Render, PythonAnywhere, or Litterbox accepts a real 1 GB upload.
 
@@ -161,7 +161,7 @@ Shared rules for all tools:
 python -m unittest test_mcp -v
 ```
 
-`test_download.py` covers the website, `test_mcp.py` covers the MCP endpoint, `test_oauth.py` covers the OAuth flow/scopes, `test_multiclient.py` covers independent clients, and `test_pages.py` covers the public trust pages and the challenge route; `python -m unittest discover -v` runs them all. Local verification of a real storage roundtrip through `/mcp` requires reachable providers: Litterbox has previously returned HTTP 403 for some networks.
+`test_download.py` covers the website, `test_mcp.py` covers the MCP endpoint, `test_oauth.py` covers the OAuth flow/scopes, `test_multiclient.py` covers independent clients, `test_postgres.py` and `test_postgres_oauth.py` cover PostgreSQL (when configured), and `test_pages.py` covers the public trust pages and the challenge route; `python -m unittest discover -v` runs them all. Local verification of a real storage roundtrip through `/mcp` requires reachable providers: Litterbox has previously returned HTTP 403 for some networks.
 
 ## Render Free + Neon Free
 
