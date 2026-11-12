@@ -24,6 +24,7 @@ from psycopg.rows import dict_row
 from requests_toolbelt.multipart.encoder import MultipartEncoder
 from urllib.parse import urljoin, urlparse
 from werkzeug.exceptions import HTTPException
+from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import secure_filename
 
 from oauth.constants import OAUTH_SCHEMA
@@ -206,6 +207,29 @@ app.config.update(
 )
 if os.environ.get('RENDER') == 'true' and not app.config['DATABASE_URL']:
     raise RuntimeError('Set DATABASE_URL to a persistent PostgreSQL database before starting on Render.')
+
+
+def apply_proxy_trust(target_app):
+    """Trust the reverse proxy's scheme, but only behind a known proxy.
+
+    Render and PythonAnywhere terminate TLS in front of the application and
+    report the original scheme in X-Forwarded-Proto. ProxyFix is therefore
+    enabled only when the deployment is known to sit behind that proxy, so a
+    client-supplied header can never mark a direct request as HTTPS.
+
+    X-Forwarded-For and the Host header are deliberately not trusted: the
+    client address keeps coming from CF-Connecting-IP / X-Real-IP through
+    client_address().
+    """
+    trusted = bool(target_app.config.get('TRUST_RENDER_PROXY')
+                   or target_app.config.get('TRUST_PYTHONANYWHERE_PROXY'))
+    if trusted:
+        target_app.wsgi_app = ProxyFix(target_app.wsgi_app, x_for=0, x_proto=1,
+                                       x_host=0, x_port=0, x_prefix=0)
+    return trusted
+
+
+apply_proxy_trust(app)
 expire_seconds = {'1h': 3600, '12h': 43200, '24h': 86400, '72h': 259200, '168h': 604800}
 banned_exts = {'.exe', '.scr', '.cpl', '.jar', '.bat', '.cmd', '.com', '.pif', '.vbs', '.wsf'}
 BLOB_API = 'https://vercel.com/api/blob'
