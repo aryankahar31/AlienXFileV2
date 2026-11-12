@@ -58,6 +58,10 @@ class McpTest(unittest.TestCase):
             UPLOAD_RATE_LIMIT=1000, LOOKUP_RATE_LIMIT=1000, RATE_WINDOW_SECONDS=60,
             TRUST_PYTHONANYWHERE_PROXY=False, TRUST_RENDER_PROXY=False,
             MCP_ENABLED=True, MCP_API_KEY='', MCP_MAX_UPLOAD_BYTES=5_242_880,
+            # The legacy anonymous development mode is opt-in. These tests
+            # exercise it explicitly; the default (fail-closed) behaviour is
+            # covered by test_mcp_auth.py.
+            MCP_ALLOW_ANONYMOUS=True, MCP_ALLOW_ANONYMOUS_WRITES=True,
             MCP_RATE_LIMIT=1000, MCP_LOOKUP_RATE_LIMIT=1000, MCP_RATE_WINDOW=600,
             MCP_PUBLIC_BASE_URL='',
             MCP_ALLOWED_ORIGINS='https://chatgpt.com,https://chat.openai.com'))

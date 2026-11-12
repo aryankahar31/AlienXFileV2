@@ -96,8 +96,23 @@ EXPIRY_HELP = ('Allowed expires_in values: 1h, 12h, 24h, 72h, 168h (aliases: '
                'when they equal 1, 12, 24, 72 or 168 hours). '
                'The default is 24h.')
 
-if os.environ.get('ALIENX_MCP_ENABLED', '0') == '1' and not os.environ.get('MCP_API_KEY', '').strip():
-    logger.warning('MCP_API_KEY is not set: POST /mcp allows anonymous access (dev mode).')
+if os.environ.get('ALIENX_MCP_ENABLED', '0') == '1':
+    _mcp_owner_hash = os.environ.get('OWNER_PASSWORD_HASH', '').strip()
+    _mcp_oauth_ready = (_mcp_owner_hash.startswith('$argon2')
+                         and os.environ.get('ALIENX_OAUTH_ENABLED', '1').strip().lower()
+                         in ('1', 'true', 'yes', 'on')
+                         and os.environ.get('MCP_OAUTH_ENABLED', '1').strip().lower()
+                         in ('1', 'true', 'yes', 'on'))
+    _mcp_api_key = os.environ.get('MCP_API_KEY', '').strip()
+    _mcp_anonymous = os.environ.get('MCP_ALLOW_ANONYMOUS', '0').strip().lower() in (
+        '1', 'true', 'yes', 'on')
+    if _mcp_anonymous:
+        logger.warning('MCP_ALLOW_ANONYMOUS is enabled: POST /mcp accepts unauthenticated '
+                       'requests. Use this for local development only.')
+    elif not _mcp_oauth_ready and not _mcp_api_key:
+        logger.warning('MCP is enabled without an authentication method: POST /mcp will '
+                       'refuse requests with HTTP 503 until OWNER_PASSWORD_HASH or '
+                       'MCP_API_KEY is configured.')
 
 
 class ToolError(Exception):
@@ -185,6 +200,16 @@ def _oauth_required():
                 and oauth_enabled() and owner_configured())
 
 
+def _anonymous_allowed():
+    """Explicit opt-in for the legacy anonymous development mode."""
+    return bool(current_app.config.get('MCP_ALLOW_ANONYMOUS', False))
+
+
+def _anonymous_writes_allowed():
+    """Explicit opt-in for anonymous write tools (development only)."""
+    return bool(current_app.config.get('MCP_ALLOW_ANONYMOUS_WRITES', False))
+
+
 def _auth_challenge(scope=None, error=None, description=None):
     if _oauth_required():
         return challenge_header(scope=scope, error=error, description=description)
@@ -196,12 +221,30 @@ def _unauthorized(message, request_id=None, scope=None, error=None):
                          {'WWW-Authenticate': _auth_challenge(scope, error)})
 
 
+def _auth_not_configured(request_id=None):
+    """Refuse the request instead of silently serving it anonymously.
+
+    The endpoint is enabled but neither an OAuth owner account nor a static
+    API key is configured, so there is no credential a client could present.
+    Answering 503 keeps the misconfiguration visible instead of exposing the
+    write tools to the public internet.
+    """
+    return mcp_rpc_error(
+        -32003,
+        'MCP is enabled but no authentication method is configured. '
+        'Set OWNER_PASSWORD_HASH or MCP_API_KEY in the server environment.',
+        request_id, 503)
+
+
 def check_mcp_auth():
     """Return a response to send when the request is denied, else None.
 
     OAuth access tokens are the primary mode when an owner account is
-    configured. MCP_API_KEY remains an optional admin fallback for private
-    deployments, and leaving both unset preserves anonymous dev mode.
+    configured and MCP_API_KEY remains an optional admin fallback. There is no
+    silent fallback to anonymous access: without a configured credential the
+    endpoint refuses the request. The legacy anonymous development mode is
+    reachable only through the explicit MCP_ALLOW_ANONYMOUS opt-in and is
+    read-only unless MCP_ALLOW_ANONYMOUS_WRITES is enabled as well.
     """
     api_key = (current_app.config.get('MCP_API_KEY') or '').strip()
     oauth_required = _oauth_required()
@@ -233,13 +276,21 @@ def check_mcp_auth():
     if api_key:
         return _unauthorized('Unauthorized: send Authorization: Bearer <MCP_API_KEY>.',
                              request_id)
-    return None  # Anonymous dev mode (startup warning already logged).
+    if _anonymous_allowed():
+        anonymous_scopes = {READ_SCOPE}
+        if _anonymous_writes_allowed():
+            anonymous_scopes.add(WRITE_SCOPE)
+        request.environ['ALIENX_MCP_AUTH'] = {
+            'kind': 'anonymous', 'scopes': frozenset(anonymous_scopes),
+        }
+        return None
+    return _auth_not_configured(request_id)
 
 
 def _auth_scopes():
     ctx = request.environ.get('ALIENX_MCP_AUTH')
     if ctx is None:
-        return frozenset(SUPPORTED_SCOPES)  # anonymous dev mode
+        return frozenset()
     return frozenset(ctx.get('scopes') or ())
 
 
@@ -258,7 +309,16 @@ def _tool_scope(name):
 
 def _check_tool_scope(name, request_id):
     required = _tool_scope(name)
-    if required is None or _has_scope(required):
+    if required is None:
+        return None
+    ctx = request.environ.get('ALIENX_MCP_AUTH') or {}
+    if (ctx.get('kind') == 'anonymous' and required == WRITE_SCOPE
+            and not _anonymous_writes_allowed()):
+        return mcp_rpc_error(
+            -32001,
+            'Forbidden: anonymous access is read-only. Authenticate to use write tools.',
+            request_id, 403, {'WWW-Authenticate': 'Bearer'})
+    if _has_scope(required):
         return None
     return mcp_rpc_error(
         -32001, f'Forbidden: this connection needs the {required} scope.',

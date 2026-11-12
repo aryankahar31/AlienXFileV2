@@ -180,6 +180,13 @@ app.config.update(
     # MCP endpoint (POST /mcp): off unless explicitly enabled; API key optional.
     MCP_ENABLED=os.environ.get('ALIENX_MCP_ENABLED', '0') == '1',
     MCP_OAUTH_ENABLED=_enabled_env('MCP_OAUTH_ENABLED', '1'),
+    # Authentication is mandatory for /mcp. The legacy anonymous development
+    # mode is reachable only through this explicit opt-in and stays read-only
+    # unless MCP_ALLOW_ANONYMOUS_WRITES is also set. Neither flag is set in
+    # render.yaml, so a deployment that forgets to configure an owner hash or
+    # an API key refuses MCP requests instead of serving them anonymously.
+    MCP_ALLOW_ANONYMOUS=_enabled_env('MCP_ALLOW_ANONYMOUS', '0'),
+    MCP_ALLOW_ANONYMOUS_WRITES=_enabled_env('MCP_ALLOW_ANONYMOUS_WRITES', '0'),
     MCP_API_KEY=os.environ.get('MCP_API_KEY', ''),
     MCP_MAX_UPLOAD_BYTES=mcp_max_upload_bytes,
     MCP_RATE_LIMIT=int(os.environ.get('MCP_RATE_LIMIT', 60)),
