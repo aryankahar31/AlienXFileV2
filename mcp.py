@@ -26,6 +26,10 @@ import requests
 from flask import Blueprint, current_app, jsonify, request
 from werkzeug.test import EnvironBuilder
 
+from oauth.constants import ADMIN_SCOPE, READ_SCOPE, SCOPE_DESCRIPTIONS, SUPPORTED_SCOPES, WRITE_SCOPE
+from oauth.metadata import challenge_header, owner_configured, oauth_enabled
+from oauth.store import validate_access_token
+
 logger = logging.getLogger(__name__)
 
 mcp_bp = Blueprint('mcp', __name__)
@@ -175,18 +179,91 @@ def _tool_result(request_id, text, is_error):
 
 # ── Auth (Phase 1; OAuth 2.1 is Phase 2 and will extend this function) ──────
 
+def _oauth_required():
+    """OAuth is the primary MCP auth mode once an owner account exists."""
+    return bool(current_app.config.get('MCP_OAUTH_ENABLED', True)
+                and oauth_enabled() and owner_configured())
+
+
+def _auth_challenge(scope=None, error=None, description=None):
+    if _oauth_required():
+        return challenge_header(scope=scope, error=error, description=description)
+    return 'Bearer'
+
+
+def _unauthorized(message, request_id=None, scope=None, error=None):
+    return mcp_rpc_error(-32001, message, request_id, 401,
+                         {'WWW-Authenticate': _auth_challenge(scope, error)})
+
+
 def check_mcp_auth():
-    """Return a response to send when the request is denied, else None."""
+    """Return a response to send when the request is denied, else None.
+
+    OAuth access tokens are the primary mode when an owner account is
+    configured. MCP_API_KEY remains an optional admin fallback for private
+    deployments, and leaving both unset preserves anonymous dev mode.
+    """
     api_key = (current_app.config.get('MCP_API_KEY') or '').strip()
-    if not api_key:
-        return None  # Anonymous dev mode (startup warning already logged).
+    oauth_required = _oauth_required()
     header = request.headers.get('Authorization', '')
-    token = header[len('Bearer '):] if header.startswith('Bearer ') else ''
-    if not token or not hmac.compare_digest(token.encode('utf-8'), api_key.encode('utf-8')):
-        _, payload = mcp_request_payload()
-        return mcp_rpc_error(-32001, 'Unauthorized: send Authorization: Bearer <MCP_API_KEY>.',
-                             mcp_rpc_id(payload), 401, {'WWW-Authenticate': 'Bearer'})
+    token = header[len('Bearer '):].strip() if header.startswith('Bearer ') else ''
+    _, payload = mcp_request_payload()
+    request_id = mcp_rpc_id(payload)
+
+    oauth_ctx = None
+    if token and oauth_required:
+        oauth_ctx = validate_access_token(
+            token, current_app.config.get('OAUTH_AUDIENCE'))
+        if oauth_ctx is not None:
+            request.environ['ALIENX_MCP_AUTH'] = oauth_ctx
+            return None
+
+    if token and api_key and hmac.compare_digest(token.encode('utf-8'), api_key.encode('utf-8')):
+        request.environ['ALIENX_MCP_AUTH'] = {
+            'kind': 'api_key', 'scopes': frozenset(SUPPORTED_SCOPES),
+        }
+        return None
+
+    if oauth_required:
+        if token:
+            return _unauthorized('Unauthorized: the access token is invalid or expired.',
+                                 request_id, error='invalid_token')
+        return _unauthorized('Unauthorized: authorize an MCP client with OAuth.',
+                             request_id)
+    if api_key:
+        return _unauthorized('Unauthorized: send Authorization: Bearer <MCP_API_KEY>.',
+                             request_id)
+    return None  # Anonymous dev mode (startup warning already logged).
+
+
+def _auth_scopes():
+    ctx = request.environ.get('ALIENX_MCP_AUTH')
+    if ctx is None:
+        return frozenset(SUPPORTED_SCOPES)  # anonymous dev mode
+    return frozenset(ctx.get('scopes') or ())
+
+
+def _has_scope(required):
+    scopes = _auth_scopes()
+    return required in scopes or ADMIN_SCOPE in scopes
+
+
+def _tool_scope(name):
+    if name in ('upload_file', 'share_text'):
+        return WRITE_SCOPE
+    if name in LOOKUP_TOOLS:
+        return READ_SCOPE
     return None
+
+
+def _check_tool_scope(name, request_id):
+    required = _tool_scope(name)
+    if required is None or _has_scope(required):
+        return None
+    return mcp_rpc_error(
+        -32001, f'Forbidden: this connection needs the {required} scope.',
+        request_id, 403,
+        {'WWW-Authenticate': _auth_challenge(required, 'insufficient_scope')})
 
 
 def _allowed_origins():
@@ -344,6 +421,9 @@ def _handle_tools_call(payload, request_id):
     if not isinstance(arguments, dict):
         return mcp_rpc_error(-32602, 'Invalid params: arguments must be an object.',
                              request_id, 200)
+    denied = _check_tool_scope(name, request_id)
+    if denied is not None:
+        return denied
     try:
         text = _dispatch_tool(name, arguments)
     except ToolError as exc:
@@ -363,11 +443,25 @@ def _security_fields():
     Anonymous mode declares no scheme at all: "none" is not a valid OpenAPI
     security-scheme type, and clients treat a tool without security as public.
     """
+    schemes = {}
+    security = []
     if (current_app.config.get('MCP_API_KEY') or '').strip():
-        return ({'bearerAuth': {'type': 'http', 'scheme': 'bearer',
-                                'description': 'Send Authorization: Bearer <MCP_API_KEY>.'}},
-                [{'bearerAuth': []}])
-    return {}, []
+        schemes['bearerAuth'] = {'type': 'http', 'scheme': 'bearer',
+                                 'description': 'Send Authorization: Bearer <MCP_API_KEY>.'}
+        security.append({'bearerAuth': []})
+    if _oauth_required():
+        issuer = (current_app.config.get('OAUTH_ISSUER') or '').rstrip('/')
+        schemes['oauth2'] = {
+            'type': 'oauth2',
+            'flows': {'authorizationCode': {
+                'authorizationUrl': issuer + '/oauth/authorize',
+                'tokenUrl': issuer + '/oauth/token',
+                'refreshUrl': issuer + '/oauth/token',
+                'scopes': SCOPE_DESCRIPTIONS,
+            }},
+        }
+        security.append({'oauth2': [READ_SCOPE, WRITE_SCOPE]})
+    return schemes, security
 
 
 def _tool_definitions():

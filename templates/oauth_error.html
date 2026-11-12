@@ -1,0 +1,10 @@
+{% extends "_oauth_base.html" %}
+{% block title %}Authorization error{% endblock %}
+{% block content %}
+<h1>Authorization error</h1>
+<p class="oauth-sub">The request could not be completed.</p>
+<div class="oauth-error" role="alert">{{ error }}</div>
+<div class="oauth-actions">
+    <a class="oauth-btn" href="{{ url_for('index') }}">Back to AlienXFile</a>
+</div>
+{% endblock %}

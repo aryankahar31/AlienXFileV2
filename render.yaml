@@ -20,3 +20,19 @@ services:
         sync: false
       - key: ALIENX_PUBLIC_BASE_URL
         value: https://alienxfilev2.onrender.com
+      - key: SECRET_KEY
+        generateValue: true
+      - key: ALIENX_OAUTH_ENABLED
+        value: "1"
+      - key: MCP_OAUTH_ENABLED
+        value: "1"
+      - key: OWNER_USERNAME
+        value: owner
+      - key: OWNER_PASSWORD_HASH
+        sync: false
+      - key: OAUTH_ISSUER
+        value: https://alienxfilev2.onrender.com
+      - key: OAUTH_AUDIENCE
+        value: https://alienxfilev2.onrender.com/mcp
+      - key: OAUTH_COOKIE_SECURE
+        value: "1"

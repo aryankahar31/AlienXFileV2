@@ -28,16 +28,20 @@ Temporary file and text sharing platform with dual storage (Vercel Blob default 
 | `static/style.css` | CSS — neo-brutalist design, dark mode, graph-paper grid |
 | `templates/index.html` | Upload page — file/folder/text modes, advanced options |
 | `templates/download.html` | Download page — preview system, lightbox, countdown, decryption |
-| `test_download.py` | 40 tests, all passing |
+| `test_download.py` | 83 tests, all passing |
 | `mcp.py` | MCP blueprint — stateless JSON-RPC 2.0 at `POST /mcp` (5 tools, Phase 1 auth, daily byte budgets) |
 | `test_mcp.py` | 53 MCP tests, all passing |
 | `test_pages.py` | 7 tests for /privacy /terms /support + challenge route, all passing |
+| `oauth/` | OAuth 2.1 package: `constants.py` schema/scopes, `security.py` Argon2/PKCE/CSRF, `store.py` DB, `metadata.py` discovery, `blueprint.py` routes |
+| `test_oauth.py` | 35 OAuth flow, scope, auth, revocation, CIMD and hardening tests |
+| `test_multiclient.py` | 8 independent-client isolation tests |
+| `docs/OAUTH.md` / `docs/MCP_CLIENTS.md` / `docs/DEPLOYMENT.md` | OAuth design, client setup, deployment steps |
 | `render.yaml` | Render Blueprint config |
 | `pa_proxy/app.py` | Fly.io proxy app |
 | `pa_proxy/fly.toml` | Fly.io config |
 | `README.md` | Documentation |
 
-## Features Implemented (39 → 150 tests)
+## Features Implemented (39 → 193 tests)
 
 ### Core Features
 1. Paste text/files
@@ -172,8 +176,15 @@ Temporary file and text sharing platform with dual storage (Vercel Blob default 
 9. All "five-digit" text references updated across templates and README
 10. `renderUpload()` key validation: `^\d{5}$` → `^[A-Za-z0-9]{3,20}$`
 
+### Personal OAuth 2.1 (branch `feat/personal-oauth-mcp`, uncommitted)
+- Single-owner authorization server: discovery + protected-resource metadata, DCR, CIMD, authorization-code + PKCE S256, rotating refresh tokens with family revocation, RFC 7009 revocation, Argon2id owner login, DB-backed HttpOnly sessions, CSRF-protected login/consent/account forms.
+- Scopes `alienxfile:read|write|delete|admin`; default grant read+write; MCP tools enforce read/write per action and admin as a superset. `MCP_API_KEY` remains an optional admin fallback; anonymous dev mode is preserved when no owner/API key is configured.
+- Tokens, codes, secrets and sessions are stored only as SHA-256 hashes; owner password uses Argon2id. CIMD fetches are bounded, SSRF-checked, HTTPS-only and cached for an hour.
+- Owner UI at `/login` and `/account`; opaque `WWW-Authenticate: Bearer resource_metadata=…` challenges from `/mcp`; scope failures return JSON-RPC `-32001` with HTTP 403 and `insufficient_scope`.
+- New tests: `test_oauth.py` (35) and `test_multiclient.py` (8); no push/deploy performed.
+
 ## Testing
-- 150 tests passing (143 run + 7 skipped): `python3 -m unittest discover -v` → `test_download.py` (83) + `test_mcp.py` (53) + `test_pages.py` (7) + `test_postgres.py` (7, skips without `ALIENX_TEST_DATABASE_URL`)
+- 193 tests passing (186 run + 7 skipped): `python3 -m unittest discover -v` → `test_download.py` (83) + `test_mcp.py` (53) + `test_pages.py` (7) + `test_oauth.py` (35) + `test_multiclient.py` (8) + `test_postgres.py` (7, skips without `ALIENX_TEST_DATABASE_URL`)
 - Website tests cover: upload, download, text, file, folder, encryption, rate limiting, CSP headers, QR codes, preview endpoint, custom codes, dark mode, template escaping, encrypted-preview 400, Litterbox preview User-Agent, preview-category page parity, decrypt DOM contract, markdown link allowlist (executes `renderMarkdown` in `node`), hostile filename sanitization, ZIP traversal/collision safety, storage-URL revalidation, url-meta redirect hardening, preview/urlmeta rate buckets, multi-file single-code batches (one share, per-file download, ZIP names/duplicates/traversal, expiry, 50-file form ceiling, frontend contract), separate-codes option (default OFF batch vs opt-in per-file `/upload`, single-file path, folder ignore, partial-failure reporting, no-regression guards), EFM1 encrypted batches (parameter validation before storage, all-or-nothing cleanup + 409 path, page/API leak sweep, ciphertext-only downloads with neutral names, framed cipher bundle + traversal/format checks, shared lookup-bucket429, corrupt-content 500, expiry before any ciphertext fetch (410 on cipher/per-file/ZIP), streamed byte-identical bundle framing (generator + >64 KB multi-chunk), bundle concurrency slot (429 without storage fetch + release-on-close), client contracts for upload.js/download.html, cross-language node round trip: encrypt in `upload.js` → Python serve → unlock/tamper-reject in `download.html`, browser ZIP → Python `zipfile` interop with CRC/UTF-8/traversal checks)
 - MCP tests cover: handshake, tools/list schema, all 5 tools, expiry aliases, auth (missing/wrong/right key), disabled 404, rate buckets, daily byte budgets (per-IP + global, fail-closed DB path, window reset), JSON-RPC error matrix, 413/415/403/405, DB-failure JSON shape, encrypted-share no-ciphertext, no-secrets sweep
 - Pages tests cover: DB-free rendering, indexable headers/canonicals, fact-checked privacy/terms content, support email gating, challenge token exact-by-body/plain-text behavior, discovery untouched

@@ -79,7 +79,7 @@ The size warning suggests Litterbox when a file exceeds the normal limit; it doe
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `ALIENX_MCP_ENABLED` | `0` | Set to `1` to serve `/mcp`; any other value returns 404 for GET and POST. |
-| `MCP_API_KEY` | empty | Optional shared secret. When set, every `/mcp` request needs `Authorization: Bearer <key>` and otherwise gets 401 with JSON-RPC `-32001`. Empty means anonymous mode with a startup warning. Keep it in dashboard secrets, never in source. |
+| `MCP_API_KEY` | empty | Optional legacy static bearer/admin fallback. When OAuth is enabled with an owner account, clients normally authenticate with OAuth instead. With only this key set, every `/mcp` request needs `Authorization: Bearer <key>` and otherwise gets 401 with JSON-RPC `-32001`. Keep it in dashboard secrets, never in source. |
 | `ALIENX_PUBLIC_BASE_URL` | `https://alienxfilev2.onrender.com` | Base used for returned `/share/<code>` and `/download/<code>` URLs. |
 | `MCP_MAX_UPLOAD_BYTES` | `5242880` (5 MiB) | Size cap for `upload_file`: decoded `content_base64` length and ChatGPT-provided file downloads (Content-Length pre-check plus a streamed cap), also bounding the JSON request body (413 beyond it). |
 | `MCP_RATE_LIMIT` | `60` | Requests per IP in the write bucket (`initialize`, `ping`, `tools/list`, `share_text`, `upload_file`). |
@@ -90,6 +90,41 @@ The size warning suggests Litterbox when a file exceeds the normal limit; it doe
 | `MCP_DAILY_BYTES_WINDOW` | `86400` | Seconds a byte-budget row stays valid before it is pruned (minimum `60`). The website's short rate-limit prunes deliberately skip `mcp_bytes` rows so the budget can last a full day. |
 | `MCP_ALLOWED_ORIGINS` | `https://chatgpt.com,https://chat.openai.com` | Browser `Origin` allowlist. Any other Origin gets 403; clients that send no Origin (curl, server-side SDKs) are unaffected. |
 | `MCP_FILE_HOST_SUFFIXES` | `oaiusercontent.com,openai.com` | Comma-separated host suffix allowlist for ChatGPT `file` downloads. Matching is exact or dot-boundary (`files.oaiusercontent.com` matches, `evil-oaiusercontent.com` does not). Only `https` on port 443 is fetched, credentials in the URL are refused, redirects are re-validated at most 3 times, private/reserved DNS results fail closed, and the signed URL is never logged or returned. An allowlist rejection logs exactly one warning containing only the sanitized bare hostname (`[a-z0-9.-]`, max 100 chars) plus the reason `host_not_allowed` (initial URL) or `redirect_host_not_allowed` (redirect hop) — never the scheme, path, query, fragment, userinfo, or port. |
+
+### Personal OAuth
+
+Setting `OWNER_PASSWORD_HASH` enables a single-owner OAuth 2.1 authorization server for MCP clients. Generate the Argon2id hash interactively (it is never echoed or stored in source):
+
+```bash
+flask --app flask_app owner-password-hash
+```
+
+Then set `OWNER_USERNAME` and the printed `OWNER_PASSWORD_HASH` in the environment. With an owner configured and `ALIENX_OAUTH_ENABLED=1`, `/mcp` requires an OAuth access token; `MCP_API_KEY` remains an optional admin fallback. Leaving both unset preserves the older anonymous development mode.
+
+Discovery documents live at `/.well-known/oauth-authorization-server` and `/.well-known/oauth-protected-resource` (plus the `/mcp` variant). Clients can register dynamically at `POST /oauth/register`, or use a Client ID Metadata Document (HTTPS client ID whose JSON advertises `redirect_uris`). The browser flow is `GET /oauth/authorize` → owner sign-in at `/login` → consent → `POST /oauth/token` (authorization code + PKCE S256). Refresh tokens rotate on use; replay revokes the whole token family. Owners can list and revoke clients at `/account`.
+
+Scopes are `alienxfile:read` and `alienxfile:write` (default grant); `alienxfile:delete` and `alienxfile:admin` are supported for future/admin use. MCP enforces write on `share_text`/`upload_file`, read on lookup tools, and treats admin as a superset. OAuth access tokens are opaque, stored only as SHA-256 hashes, bound to the `${OAUTH_ISSUER}/mcp` audience, and never contain share content.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `OWNER_USERNAME` | `owner` | Login name for the single owner account. |
+| `OWNER_PASSWORD_HASH` | empty | Argon2id hash from `flask owner-password-hash`; empty disables owner login and OAuth enforcement. |
+| `ALIENX_OAUTH_ENABLED` | `1` | Serves OAuth discovery/endpoints and authorization flow. |
+| `MCP_OAUTH_ENABLED` | `1` | Set to `0` to ignore OAuth for `/mcp` while keeping the endpoints available. |
+| `OAUTH_ISSUER` | `ALIENX_PUBLIC_BASE_URL` or `SITE_URL` | Exact public origin used in metadata and validated `iss`/audience values. |
+| `OAUTH_AUDIENCE` | `${OAUTH_ISSUER}/mcp` | Protected resource identifier echoed in token requests and enforced on access tokens. |
+| `SECRET_KEY` | random per process | Signs login CSRF values. Set a stable secret in production, otherwise a restart invalidates in-flight sign-in forms. |
+| `OAUTH_ACCESS_TOKEN_TTL` | `900` | Access-token lifetime in seconds. |
+| `OAUTH_REFRESH_TOKEN_TTL` | `2592000` | Refresh-token lifetime in seconds (30 days). |
+| `OAUTH_CODE_TTL` | `300` | Authorization-code lifetime in seconds. |
+| `OAUTH_SESSION_TTL` | `43200` | Owner browser-session lifetime in seconds. |
+| `OAUTH_COOKIE_SECURE` | on when `OAUTH_ISSUER` is HTTPS | Adds `Secure` to owner session/login-CSRF cookies. |
+| `OAUTH_DCR_ENABLED` | `1` | Enables `POST /oauth/register` dynamic client registration. |
+| `OAUTH_CIMD_ENABLED` | `1` | Enables HTTPS Client ID Metadata Documents. |
+| `OAUTH_AUTHORIZE_RATE_LIMIT` / `OAUTH_TOKEN_RATE_LIMIT` / `OAUTH_REGISTER_RATE_LIMIT` / `OAUTH_REVOKE_RATE_LIMIT` / `OAUTH_ACCOUNT_RATE_LIMIT` | `60` / `60` / `10` / `30` / `60` | Per-IP buckets per `RATE_WINDOW_SECONDS`. |
+| `LOGIN_RATE_LIMIT` | `20` | Per-IP sign-in attempts per `RATE_WINDOW_SECONDS`; the owner username also has a 10-attempt/15-minute database bucket. |
+
+OAuth pages send `noindex`, `no-store`, and a strict CSP. Owner passwords are verified with Argon2id; tokens/codes are stored hashed; codes are one-time and PKCE-bound; revoking a client removes its consents and tokens. Only the owner account exists: there is no public signup, password reset, email delivery, or multi-user administration.
 
 Beyond the gateway IP limits, `/mcp` shares the site-wide constraints: 1 GB absolute request cap, `MAX_TEXT_LENGTH`, banned executable extensions, custom-code validation, and provider fallback.
 
@@ -126,7 +161,7 @@ Shared rules for all tools:
 python -m unittest test_mcp -v
 ```
 
-`test_download.py` covers the website, `test_mcp.py` covers the MCP endpoint, and `test_pages.py` covers the public trust pages and the challenge route; `python -m unittest discover -v` runs all three. Local verification of a real storage roundtrip through `/mcp` requires reachable providers: Litterbox has previously returned HTTP 403 for some networks.
+`test_download.py` covers the website, `test_mcp.py` covers the MCP endpoint, `test_oauth.py` covers the OAuth flow/scopes, `test_multiclient.py` covers independent clients, and `test_pages.py` covers the public trust pages and the challenge route; `python -m unittest discover -v` runs them all. Local verification of a real storage roundtrip through `/mcp` requires reachable providers: Litterbox has previously returned HTTP 403 for some networks.
 
 ## Render Free + Neon Free
 
@@ -236,7 +271,7 @@ SQLite's short write transactions suit a small site, but writes serialize and ca
 - Expiry blocks access through this app; provider retention is separate, and neither expiry nor cancellation can recall downloaded copies. Keep your own backup of anything important. Availability can end before the selected expiry.
 - Limits are **10 upload requests per IP per 600 seconds** and **30 lookup requests per IP per 600 seconds**, using separate fixed windows stored in the configured database. Failed requests also count. A valid code-form POST followed by its redirect to the details page counts as **two lookups**; fetching its QR code or clicking the file download link counts as another. Requests beyond the allowance return 429 with `Retry-After`.
 - Each file sent from the browser queue consumes one upload request; files rejected locally do not. Users behind a shared NAT/IP share the allowance, and fixed-window limits are not a substitute for authentication or comprehensive abuse protection.
-- The MCP endpoint `POST /mcp` is off by default (`ALIENX_MCP_ENABLED=0`), has its own per-IP buckets (`MCP_RATE_LIMIT`, `MCP_LOOKUP_RATE_LIMIT`, `MCP_RATE_WINDOW`), enforces `MCP_API_KEY` when configured, and never logs request bodies. Enabling it does not change the website limits above. MCP writes additionally consume daily byte budgets (`MCP_DAILY_BYTES_PER_IP`, `MCP_GLOBAL_DAILY_BYTES`) that read tools do not touch.
+- The MCP endpoint `POST /mcp` is off by default (`ALIENX_MCP_ENABLED=0`), has its own per-IP buckets (`MCP_RATE_LIMIT`, `MCP_LOOKUP_RATE_LIMIT`, `MCP_RATE_WINDOW`), requires OAuth when an owner account is configured (or `MCP_API_KEY` otherwise), and never logs request bodies. Enabling it does not change the website limits above. MCP writes additionally consume daily byte budgets (`MCP_DAILY_BYTES_PER_IP`, `MCP_GLOBAL_DAILY_BYTES`) that read tools do not touch.
 - The public trust pages `/privacy`, `/terms` and `/support` describe storage, retention and acceptable use in fact-checked terms; set `ALIENX_SUPPORT_EMAIL` to publish a contact address on `/support` (invalid or empty values hide it). ChatGPT app-directory domain verification reads `/.well-known/openai-apps-challenge`, which returns 404 while `OPENAI_APPS_CHALLENGE_TOKEN` is unset.
 - Some executable/script filename extensions are blocked, but the app does not scan file contents for malware. Treat downloaded files as untrusted.
 - QR codes encode the details URL and use the same expiration checks and lookup rate limits. Anyone who scans one can access the share, just like anyone holding its URL.

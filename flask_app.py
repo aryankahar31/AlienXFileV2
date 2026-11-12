@@ -26,6 +26,9 @@ from urllib.parse import urljoin, urlparse
 from werkzeug.exceptions import HTTPException
 from werkzeug.utils import secure_filename
 
+from oauth.constants import OAUTH_SCHEMA
+from oauth.security import hash_password
+
 app = Flask(__name__)
 SITE_URL = 'https://alienxfilev2.onrender.com/'
 logging.basicConfig(level=logging.INFO)
@@ -86,10 +89,47 @@ if mcp_daily_bytes_per_ip < 0 or mcp_global_daily_bytes < 0:
 mcp_daily_bytes_window = int(os.environ.get('MCP_DAILY_BYTES_WINDOW', 86_400))
 if mcp_daily_bytes_window < 60:
     raise ValueError('MCP_DAILY_BYTES_WINDOW must be at least 60 seconds.')
+def _positive_int_env(name, default):
+    try:
+        value = int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        raise ValueError(f'{name} must be an integer.')
+    if value <= 0:
+        raise ValueError(f'{name} must be greater than zero.')
+    return value
+
+
+def _enabled_env(name, default):
+    return os.environ.get(name, default).strip().lower() in ('1', 'true', 'yes', 'on')
+
+
 support_email = os.environ.get('ALIENX_SUPPORT_EMAIL', '').strip()
 if support_email and not re.fullmatch(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}', support_email):
     logger.warning('ALIENX_SUPPORT_EMAIL is not a valid address; support pages will hide it.')
     support_email = ''
+oauth_issuer = (os.environ.get('OAUTH_ISSUER')
+                or os.environ.get('ALIENX_PUBLIC_BASE_URL')
+                or SITE_URL).rstrip('/')
+oauth_audience = (os.environ.get('OAUTH_AUDIENCE') or oauth_issuer + '/mcp').rstrip('/')
+_issuer_url = urlparse(oauth_issuer)
+_audience_url = urlparse(oauth_audience)
+if (_issuer_url.scheme not in ('http', 'https') or not _issuer_url.netloc
+        or _issuer_url.path not in ('', '/') or _issuer_url.query or _issuer_url.fragment
+        or '@' in _issuer_url.netloc):
+    raise ValueError('OAUTH_ISSUER must be an absolute origin such as https://example.com.')
+if _issuer_url.scheme == 'http' and _issuer_url.hostname not in ('localhost', '127.0.0.1', '::1'):
+    raise ValueError('OAUTH_ISSUER must use HTTPS outside local development.')
+if (_audience_url.scheme not in ('http', 'https') or not _audience_url.netloc
+        or _audience_url.query or _audience_url.fragment or '@' in _audience_url.netloc):
+    raise ValueError('OAUTH_AUDIENCE must be an absolute HTTPS URL.')
+owner_username = (os.environ.get('OWNER_USERNAME') or 'owner').strip()[:200] or 'owner'
+owner_password_hash = os.environ.get('OWNER_PASSWORD_HASH', '').strip()
+oauth_owner_configured = bool(owner_password_hash.startswith('$argon2'))
+if owner_password_hash and not oauth_owner_configured:
+    logger.warning('OWNER_PASSWORD_HASH is not an Argon2 hash; the owner account stays disabled.')
+if not owner_password_hash:
+    logger.info('OWNER_PASSWORD_HASH is not set; OAuth owner login is disabled.')
+secret_key = os.environ.get('SECRET_KEY') or secrets.token_hex(32)
 app.config.update(
     DATABASE=os.environ.get('ALIENX_DATABASE', str(Path(__file__).with_name('shares.sqlite3'))),
     DATABASE_URL=os.environ.get('DATABASE_URL'),
@@ -104,6 +144,28 @@ app.config.update(
     # ~18 files and returned a misleading 413 "code is too long".
     MAX_FORM_PARTS=60,
     MAX_TEXT_LENGTH=100_000,
+    SECRET_KEY=secret_key,
+    OAUTH_ENABLED=_enabled_env('ALIENX_OAUTH_ENABLED', '1'),
+    OAUTH_ISSUER=oauth_issuer,
+    OAUTH_AUDIENCE=oauth_audience,
+    OAUTH_OWNER_CONFIGURED=oauth_owner_configured,
+    OWNER_USERNAME=owner_username,
+    OWNER_PASSWORD_HASH=owner_password_hash,
+    OAUTH_ACCESS_TOKEN_TTL=_positive_int_env('OAUTH_ACCESS_TOKEN_TTL', 900),
+    OAUTH_REFRESH_TOKEN_TTL=_positive_int_env('OAUTH_REFRESH_TOKEN_TTL', 2_592_000),
+    OAUTH_CODE_TTL=_positive_int_env('OAUTH_CODE_TTL', 300),
+    OAUTH_SESSION_TTL=_positive_int_env('OAUTH_SESSION_TTL', 43_200),
+    OAUTH_LOGIN_WINDOW=_positive_int_env('OAUTH_LOGIN_WINDOW', 900),
+    OAUTH_DCR_ENABLED=_enabled_env('OAUTH_DCR_ENABLED', '1'),
+    OAUTH_CIMD_ENABLED=_enabled_env('OAUTH_CIMD_ENABLED', '1'),
+    OAUTH_COOKIE_SECURE=_enabled_env(
+        'OAUTH_COOKIE_SECURE', '1' if _issuer_url.scheme == 'https' else '0'),
+    OAUTH_AUTHORIZE_RATE_LIMIT=_positive_int_env('OAUTH_AUTHORIZE_RATE_LIMIT', 60),
+    OAUTH_TOKEN_RATE_LIMIT=_positive_int_env('OAUTH_TOKEN_RATE_LIMIT', 60),
+    OAUTH_REGISTER_RATE_LIMIT=_positive_int_env('OAUTH_REGISTER_RATE_LIMIT', 10),
+    OAUTH_REVOKE_RATE_LIMIT=_positive_int_env('OAUTH_REVOKE_RATE_LIMIT', 30),
+    OAUTH_ACCOUNT_RATE_LIMIT=_positive_int_env('OAUTH_ACCOUNT_RATE_LIMIT', 60),
+    LOGIN_RATE_LIMIT=_positive_int_env('LOGIN_RATE_LIMIT', 20),
     UPLOAD_RATE_LIMIT=30,
     LOOKUP_RATE_LIMIT=30,
     # One share page makes 1 lookup + typically 1 preview call (code files) or
@@ -152,7 +214,7 @@ SCHEMA = '''
         ip TEXT NOT NULL, action TEXT NOT NULL, started DOUBLE PRECISION NOT NULL,
         hits INTEGER NOT NULL, PRIMARY KEY (ip, action)
     );
-'''
+''' + OAUTH_SCHEMA
 BACKFILL_PROVIDER = '''
     UPDATE shares SET provider = CASE
         WHEN url LIKE 'https://litter.catbox.moe/%' THEN 'litterbox' ELSE 'vercel' END
@@ -204,6 +266,19 @@ def init_db():
             db.execute('ALTER TABLE shares ADD COLUMN IF NOT EXISTS salt TEXT')
             db.execute('ALTER TABLE shares ADD COLUMN IF NOT EXISTS iv TEXT')
             db.execute('ALTER TABLE shares ADD COLUMN IF NOT EXISTS is_encrypted INTEGER DEFAULT 0')
+
+
+@app.cli.command('owner-password-hash')
+def owner_password_hash_command():
+    # Reads the password without echo and prints only the Argon2id hash.
+    import click
+    import getpass
+    password = getpass.getpass('Owner password: ')
+    if len(password) < 12:
+        raise click.ClickException('Use at least 12 characters.')
+    if getpass.getpass('Repeat password: ') != password:
+        raise click.ClickException('Passwords do not match.')
+    click.echo(hash_password(password))
 
 
 @app.teardown_appcontext
@@ -339,6 +414,12 @@ def error_response(message, status):
         code = -32603 if status >= 500 else -32600
         return jsonify({'jsonrpc': '2.0', 'id': mcp_rpc_id(cached),
                         'error': {'code': code, 'message': message}}), status
+    if request.path in ('/oauth/token', '/oauth/revoke', '/oauth/register'):
+        error = 'temporarily_unavailable' if status == 429 else 'server_error'
+        return jsonify(error=error, error_description=message), status
+    if (request.path.startswith('/oauth/') or request.path in ('/login', '/logout')
+            or request.path.startswith('/account')):
+        return render_template('oauth_error.html', error=message), status
     return render_template('download.html', error=message), status
 
 
@@ -378,6 +459,32 @@ def limit_requests():
     elif request.endpoint == 'url_meta':
         action, limit = 'urlmeta', app.config['URL_META_RATE_LIMIT']
         window = app.config['RATE_WINDOW_SECONDS']
+    elif request.endpoint == 'oauth.token':
+        action, limit = 'oauth_token', app.config['OAUTH_TOKEN_RATE_LIMIT']
+        window = app.config['RATE_WINDOW_SECONDS']
+        request.max_content_length = 64_000
+    elif request.endpoint == 'oauth.register':
+        action, limit = 'oauth_register', app.config['OAUTH_REGISTER_RATE_LIMIT']
+        window = app.config['RATE_WINDOW_SECONDS']
+        request.max_content_length = 64_000
+    elif request.endpoint == 'oauth.revoke':
+        action, limit = 'oauth_revoke', app.config['OAUTH_REVOKE_RATE_LIMIT']
+        window = app.config['RATE_WINDOW_SECONDS']
+        request.max_content_length = 64_000
+    elif request.endpoint in {'oauth.authorize', 'oauth.authorize_decision'}:
+        action, limit = 'oauth_authorize', app.config['OAUTH_AUTHORIZE_RATE_LIMIT']
+        window = app.config['RATE_WINDOW_SECONDS']
+        if request.method == 'POST':
+            request.max_content_length = 64_000
+    elif request.endpoint == 'oauth.login' and request.method == 'POST':
+        action, limit = 'login', app.config['LOGIN_RATE_LIMIT']
+        window = app.config['RATE_WINDOW_SECONDS']
+        request.max_content_length = 64_000
+    elif request.endpoint in {'oauth.account', 'oauth.revoke_client', 'oauth.revoke_client_form', 'oauth.logout'}:
+        action, limit = 'oauth_account', app.config['OAUTH_ACCOUNT_RATE_LIMIT']
+        window = app.config['RATE_WINDOW_SECONDS']
+        if request.method == 'POST':
+            request.max_content_length = 4_096
     elif request.path == '/mcp' and request.method == 'POST' and app.config.get('MCP_ENABLED'):
         if request.mimetype != 'application/json':
             return  # The /mcp view answers 415 without reading the body.
@@ -421,6 +528,9 @@ def limit_requests():
 def response_headers(response):
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['Referrer-Policy'] = 'no-referrer'
+    if request.is_secure:
+        response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+    response.headers['Permissions-Policy'] = 'camera=(), microphone=(), geolocation=()'
     response.headers['Content-Security-Policy'] = (
         "default-src 'self'; script-src 'self' 'unsafe-inline'; "
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
@@ -1443,5 +1553,7 @@ def database_error(exc):
 # MCP blueprint imported last: mcp.py imports flask_app at its own end, so the
 # circular reference resolves here once every flask_app name it needs exists.
 from mcp import LOOKUP_TOOLS, mcp_bp, mcp_rpc_error, mcp_rpc_id, mcp_request_payload  # noqa: E402
+from oauth.blueprint import oauth_bp  # noqa: E402
 
 app.register_blueprint(mcp_bp)
+app.register_blueprint(oauth_bp)

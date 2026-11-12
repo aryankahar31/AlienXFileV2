@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="referrer" content="no-referrer">
+    <meta name="robots" content="noindex, nofollow, noarchive">
+    <title>{% block title %}Owner access{% endblock %} - AlienXFile</title>
+    <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}" type="image/svg+xml">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <style>
+        body { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; }
+        .oauth-card { max-width: 560px; padding: 40px 36px; }
+        .oauth-card h1 { font-size: 28px; margin-bottom: 8px; }
+        .oauth-sub { text-align: center; color: #666; font-size: 14px; margin-bottom: 24px; }
+        .oauth-card label { display: block; font-weight: 700; font-size: 14px; margin-bottom: 6px; }
+        .oauth-card input[type="text"], .oauth-card input[type="password"] {
+            width: 100%; min-height: 46px; padding: 10px 14px; margin-bottom: 16px;
+            border: 3px solid #111; border-radius: 6px; background: #fff; color: #111;
+            font: inherit; box-shadow: 3px 3px 0 #111;
+        }
+        .oauth-card input:focus { outline: none; box-shadow: 4px 4px 0 #111; }
+        .oauth-actions { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 8px; }
+        .oauth-actions form { flex: 1; min-width: 150px; }
+        .oauth-btn {
+            width: 100%; min-height: 46px; padding: 12px 16px; border: 3px solid #111;
+            border-radius: 6px; background: var(--yellow); color: #111; font: inherit;
+            font-weight: 700; cursor: pointer; box-shadow: 4px 4px 0 #111;
+        }
+        .oauth-btn.secondary { background: var(--cream); }
+        .oauth-btn.danger { background: var(--pink); color: #fff; }
+        .oauth-btn:hover { transform: translate(-2px, -2px); box-shadow: 6px 6px 0 #111; }
+        .oauth-error {
+            background: #fff1f2; color: #b42342; border: 3px solid #F05A9B;
+            box-shadow: 3px 3px 0 #F05A9B; border-radius: 6px; padding: 12px;
+            margin-bottom: 18px; font-size: 14px; font-weight: 600; text-align: left;
+        }
+        .scope-list { list-style: none; padding: 0; margin: 0 0 20px; text-align: left; }
+        .scope-list li {
+            border: 2px solid #111; border-radius: 6px; padding: 10px 12px;
+            margin-bottom: 8px; background: var(--cream); font-size: 14px;
+        }
+        .scope-list code { font-weight: 700; }
+        .client-box {
+            border: 3px solid #111; border-radius: 6px; padding: 14px 16px;
+            box-shadow: 3px 3px 0 #111; background: var(--cream); margin-bottom: 16px;
+            text-align: left;
+        }
+        .client-box h2 { font-size: 16px; margin: 0 0 4px; }
+        .client-meta { color: #555; font-size: 12px; word-break: break-all; }
+        .oauth-footer { margin-top: 20px; font-size: 12px; color: #777; text-align: center; }
+        .oauth-footer a { color: #111; }
+        body.dark .oauth-card { background: #161b22; color: #e6edf3; border-color: var(--cyan); box-shadow: 4px 4px 0 var(--cyan); }
+        body.dark .oauth-card h1, body.dark .oauth-card h2 { color: #e6edf3; }
+        body.dark .oauth-sub, body.dark .client-meta, body.dark .oauth-footer { color: #8b949e; }
+        body.dark .oauth-card input { background: #0d1117; color: #e6edf3; border-color: var(--cyan); box-shadow: 3px 3px 0 var(--cyan); }
+        body.dark .scope-list li, body.dark .client-box { background: #0d1117; border-color: var(--cyan); box-shadow: 3px 3px 0 var(--cyan); }
+        body.dark .oauth-card .oauth-btn { border-color: #111; }
+        .dark-toggle { position: fixed; top: 18px; right: 18px; }
+    </style>
+</head>
+<body>
+    <button type="button" class="dark-toggle" id="darkToggle" aria-label="Toggle dark mode">&#9790;</button>
+    <main class="card oauth-card">
+        {% block content %}{% endblock %}
+    </main>
+    <script>
+    (function () {
+        const toggle = document.getElementById('darkToggle');
+        const saved = localStorage.getItem('alienxfile_dark');
+        if (saved === 'true' || (saved === null && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+            document.body.classList.add('dark');
+        }
+        toggle.textContent = document.body.classList.contains('dark') ? '\u2600' : '\u263E';
+        toggle.addEventListener('click', function () {
+            document.body.classList.toggle('dark');
+            const isDark = document.body.classList.contains('dark');
+            toggle.textContent = isDark ? '\u2600' : '\u263E';
+            try { localStorage.setItem('alienxfile_dark', String(isDark)); } catch (e) {}
+        });
+    })();
+    </script>
+</body>
+</html>
